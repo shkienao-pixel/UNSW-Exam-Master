@@ -1,0 +1,9 @@
+streamlit
+streamlit-echarts
+langchain
+langchain-openai
+openai
+pypdf
+python-dotenv
+chromadb
+tiktoken
