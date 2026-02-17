@@ -1,4 +1,4 @@
-streamlit
+﻿streamlit
 streamlit-echarts
 langchain
 langchain-openai
@@ -7,3 +7,4 @@ pypdf
 python-dotenv
 chromadb
 tiktoken
+reportlab

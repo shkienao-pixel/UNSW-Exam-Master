@@ -32,3 +32,8 @@ Thumbs.db
 *.log
 *.pdf
 !docs/*.pdf
+
+# Runtime data / backups
+backups/
+data/app.db
+data/chroma/
