@@ -73,6 +73,31 @@ def _current_collection() -> str:
     return name or COURSE_ID
 
 
+def _render_language_switcher() -> None:
+    """Render a simple sidebar-top language toggle with connected click buttons."""
+    if "lang" not in st.session_state:
+        st.session_state["lang"] = "zh"
+
+    c1, c2 = st.sidebar.columns(2, gap="small")
+    if c1.button(
+        _t("lang_zh"),
+        key="btn_lang_zh",
+        type="primary" if _lang() == "zh" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["lang"] = "zh"
+        st.rerun()
+    if c2.button(
+        _t("lang_en"),
+        key="btn_lang_en",
+        type="primary" if _lang() == "en" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["lang"] = "en"
+        st.rerun()
+    st.sidebar.caption(f"{_t('lang_label')}: {_t('lang_zh') if _lang() == 'zh' else _t('lang_en')}")
+
+
 def _ensure_migrations_once() -> int:
     global _MIGRATIONS_DONE
     if not _MIGRATIONS_DONE:
@@ -155,6 +180,10 @@ def _inject_unsw_css() -> None:
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] .stCaptionContainer,
         [data-testid="stSidebar"] small {{ color: {UNSW_SIDEBAR_TEXT} !important; }}
+        [data-testid="stSidebar"] .stButton > button {{
+            border-radius: 4px !important;
+            min-height: 2.1rem !important;
+        }}
         .stButton > button {{
             background: {UNSW_PRIMARY} !important;
             color: {UNSW_TEXT} !important;
@@ -432,16 +461,9 @@ def _cached_uploaded_file_objects() -> list[Any]:
 
 
 def _render_sidebar() -> None:
+    _render_language_switcher()
     st.sidebar.markdown(f'<p class="sidebar-header">{SIDEBAR_HEADER}</p>', unsafe_allow_html=True)
     st.sidebar.caption(_t("sidebar_settings"))
-    if "lang" not in st.session_state:
-        st.session_state["lang"] = "zh"
-    st.sidebar.selectbox(
-        _t("lang_label"),
-        options=["zh", "en"],
-        format_func=lambda x: _t("lang_zh") if x == "zh" else _t("lang_en"),
-        key="lang",
-    )
     if "selected_collection" not in st.session_state:
         st.session_state["selected_collection"] = COURSE_ID
     st.sidebar.text_input(
@@ -451,7 +473,11 @@ def _render_sidebar() -> None:
     )
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "dashboard"
-    st.sidebar.radio(
+    if "nav_page_radio" not in st.session_state:
+        st.session_state["nav_page_radio"] = st.session_state["nav_page"]
+    elif st.session_state["nav_page_radio"] != st.session_state["nav_page"]:
+        st.session_state["nav_page_radio"] = st.session_state["nav_page"]
+    nav_radio = st.sidebar.radio(
         _t("nav"),
         options=["dashboard", "study", "exam"],
         format_func=lambda x: (
@@ -459,8 +485,10 @@ def _render_sidebar() -> None:
             if x == "dashboard"
             else (_t("study_mode") if x == "study" else _t("exam_simulator"))
         ),
-        key="nav_page",
+        key="nav_page_radio",
     )
+    if st.session_state.get("nav_page") != nav_radio:
+        st.session_state["nav_page"] = nav_radio
     st.sidebar.text_input(
         _t("api_key"),
         type="password",
