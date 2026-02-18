@@ -11,7 +11,12 @@ AI-native exam preparation tool for UNSW students, built with Streamlit + LangCh
 ## Navigation
 
 - Default landing page is `Dashboard`.
-- Use sidebar `Navigation` to switch between `Dashboard`, `Study`, and `Exam`.
+- Use sidebar `Navigation` to switch between `Dashboard`, `Study`, `Summary`, `Graph`, `Outline`, `Quiz`, `Flashcards`, and `Exam`.
+- Before uploading any PDFs, create and select a `Course` (code + name) in the sidebar.
+- Study workspace now includes `Upload`, `Generate`, and `Outputs` tabs (outputs are saved per course).
+- In `Study -> Generate`, the four action buttons redirect to dedicated generation pages.
+- Use `Scope Set` on each generation page to persist and reuse artifact ranges for generation.
+- Quiz page supports per-question submit, bilingual answer/analysis, and translation toggle cache.
 
 ## Upgrading & Migrations
 

@@ -1,6 +1,6 @@
-"""
-LLM orchestration: summaries, chains, and prompts.
-"""
+﻿"""LLM orchestration: summaries, graph helpers, flashcards, translation, and chat."""
+
+from __future__ import annotations
 
 import base64
 import json
@@ -11,101 +11,70 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 SYSTEM_PROMPT = (
-    "你是一个 UNSW 的助教。请将以下课程内容总结为结构化的复习笔记。"
-    "包含：核心概念、关键公式（使用 LaTeX）、考试重点。请使用 Markdown 格式。"
+    "You are a UNSW teaching assistant. Summarize the provided course text into structured revision notes "
+    "using Markdown. Include key concepts, formulas (LaTeX), and exam priorities."
 )
 
-SYLLABUS_SYSTEM_PROMPT = """你是一个 UNSW 课程规划师。请分析上传的课程内容，提取出一份复习大纲。对于每个知识点，评估其考试重要性（High/Medium/Low）。
+SYLLABUS_SYSTEM_PROMPT = (
+    "You are a UNSW course planner. Return only valid JSON with this schema: "
+    '{"module_title":"...",'
+    '"frameworks":[{"framework":"...","objective":"...",'
+    '"sections":[{"section":"...","knowledge_points":['
+    '{"point":"...","detail":"...","priority":"High|Medium|Low","status":"Pending"}]}]}],'
+    '"topics":[{"topic":"...","priority":"High|Medium|Low","status":"Pending"}]}. '
+    "Use hierarchical depth: framework -> section -> knowledge_points. "
+    "Include at least 2 frameworks and at least 6 knowledge points in total."
+)
 
-你必须只输出一个合法的 JSON 对象，不要用 markdown 代码块包裹，不要输出任何 JSON 以外的文字。
-
-JSON 结构必须严格如下：
-{
-  "module_title": "章节或模块标题，如 Image Formation",
-  "topics": [
-    {"topic": "知识点名称", "priority": "High", "status": "Pending"},
-    {"topic": "另一知识点", "priority": "Medium", "status": "Pending"}
-  ]
-}
-
-要求：priority 只能是 High、Medium 或 Low；每个 topic 的 status 初始均为 Pending；至少 3 个 topics。"""
-
-FLASHCARDS_SYSTEM_PROMPT = """你是一个 UNSW 复习助手。请从课程内容中提取 8-10 个核心术语、概念或公式，制成 Active Recall 闪卡。
-
-你必须只输出一个合法的 JSON 数组，不要用 markdown 代码块包裹，不要输出任何 JSON 以外的文字。
-
-格式严格如下（数组，每项为一张卡）：
-[
-  {"front": "术语或问题（正面）", "back": "定义/答案/公式解析（背面；公式请用 LaTeX，用 $ 包裹，如 $E = mc^2$）"},
-  {"front": "下一张正面", "back": "下一张背面"}
-]
-
-要求：至少 8 张、至多 10 张卡；背面若有数学公式必须用 $...$ 或 $$...$$ 的 LaTeX 格式；正面为简短术语或提问，背面为完整解释。"""
+FLASHCARDS_SYSTEM_PROMPT = (
+    "You are a UNSW revision assistant. Return only valid JSON array of 8-10 flashcards, "
+    "each as {\"front\":\"...\",\"back\":\"...\"}. Use LaTeX for formulas when needed."
+)
 
 IMAGE_ANALYSIS_PROMPT = (
-    "你是一个 UNSW 教授。请解释这张课件截图中的视觉模型、流程或公式，"
-    "并预测它在考试中可能以什么形式出现。使用 Markdown 和 LaTeX（$...$）作答。"
+    "You are a UNSW professor. Explain the uploaded slide/screenshot, key mechanisms/formulas, "
+    "and likely exam question style. Use Markdown and LaTeX where helpful."
 )
 
 CHAT_CONTEXT_PROMPT = (
-    "你是 UNSW 助教。以下是从用户上传的资料中提取的摘要、大纲和原文片段。"
-    "请仅基于这些内容回答用户问题；若无法从资料中得出答案，请说明。使用 Markdown 和 LaTeX 作答。"
+    "You are a UNSW teaching assistant. Answer using ONLY the provided context. "
+    "If the answer cannot be derived from context, say so explicitly."
+)
+
+TRANSLATE_QUESTION_PROMPT = (
+    "You are a precise technical translator. Return only valid JSON with this schema: "
+    '{"question_zh":"...","options_zh":["...","...","...","..."]}. '
+    "Do not output markdown."
+)
+
+TRANSLATE_FLASHCARD_PROMPT = (
+    "You are a precise technical translator. Return only valid JSON with this schema: "
+    '{"stem_zh":"...","options_zh":["..."],"answer_zh":"...","explanation_zh":"..."}. '
+    "Keep terms accurate and concise. Do not output markdown."
 )
 
 
 def _call_llm(system_prompt: str, user_message: str, api_key: str, temperature: float = 0.3) -> str:
-    """
-    Invoke OpenAI Chat with the given messages.
-
-    Args:
-        system_prompt: System message content.
-        user_message: User message content.
-        api_key: OpenAI API key.
-        temperature: Model temperature.
-
-    Returns:
-        Assistant response content.
-
-    Raises:
-        ValueError: If API key is missing, invalid, or quota insufficient.
-    """
+    """Invoke OpenAI Chat with the given system and user message."""
     if not (api_key and api_key.strip()):
-        raise ValueError("请提供有效的 API Key。")
+        raise ValueError("Please provide a valid API key.")
     try:
-        llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=api_key.strip(),
-            temperature=temperature,
-        )
-        messages = [("system", system_prompt), ("human", user_message)]
-        response = llm.invoke(messages)
+        llm = ChatOpenAI(model="gpt-4o", api_key=api_key.strip(), temperature=temperature)
+        response = llm.invoke([("system", system_prompt), ("human", user_message)])
         return response.content if response.content else ""
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - network/API specific
         err_msg = str(e).lower()
         if "invalid" in err_msg or "authentication" in err_msg or "incorrect api key" in err_msg:
-            raise ValueError("API Key 无效，请检查后重试。") from e
+            raise ValueError("Invalid API key.") from e
         if "insufficient_quota" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
-            raise ValueError("API 余额不足或请求过于频繁，请稍后再试。") from e
-        raise ValueError(f"调用 API 时出错：{e!s}") from e
+            raise ValueError("API quota/rate limit reached. Please retry later.") from e
+        raise ValueError(f"API call failed: {e!s}") from e
 
 
 def _call_llm_vision(image_bytes: bytes, text_prompt: str, api_key: str) -> str:
-    """
-    Invoke OpenAI vision model with an image and text prompt.
-
-    Args:
-        image_bytes: Raw image bytes (PNG or JPEG).
-        text_prompt: Text prompt for the image.
-        api_key: OpenAI API key.
-
-    Returns:
-        Assistant response content.
-
-    Raises:
-        ValueError: If API key is missing or API call fails.
-    """
+    """Invoke OpenAI vision model with image + text prompt."""
     if not (api_key and api_key.strip()):
-        raise ValueError("请提供有效的 API Key。")
+        raise ValueError("Please provide a valid API key.")
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     mime = "image/png" if image_bytes[:8].startswith(b"\x89PNG") else "image/jpeg"
     data_url = f"data:{mime};base64,{b64}"
@@ -114,101 +83,135 @@ def _call_llm_vision(image_bytes: bytes, text_prompt: str, api_key: str) -> str:
         {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
     ]
     try:
-        llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=api_key.strip(),
-            temperature=0.3,
-        )
-        messages = [
-            SystemMessage(content=IMAGE_ANALYSIS_PROMPT),
-            HumanMessage(content=content),
-        ]
+        llm = ChatOpenAI(model="gpt-4o", api_key=api_key.strip(), temperature=0.3)
+        messages = [SystemMessage(content=IMAGE_ANALYSIS_PROMPT), HumanMessage(content=content)]
         response = llm.invoke(messages)
         return response.content if response.content else ""
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - network/API specific
         err_msg = str(e).lower()
         if "invalid" in err_msg or "authentication" in err_msg or "incorrect api key" in err_msg:
-            raise ValueError("API Key 无效，请检查后重试。") from e
+            raise ValueError("Invalid API key.") from e
         if "insufficient_quota" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
-            raise ValueError("API 余额不足或请求过于频繁，请稍后再试。") from e
-        raise ValueError(f"分析图片时出错：{e!s}") from e
+            raise ValueError("API quota/rate limit reached. Please retry later.") from e
+        raise ValueError(f"Image analysis failed: {e!s}") from e
+
+
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
+    for candidate in [raw, cleaned]:
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if match:
+        try:
+            obj = json.loads(match.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _extract_json_array(raw: str) -> list[Any]:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
+    for candidate in [raw, cleaned]:
+        try:
+            arr = json.loads(candidate)
+            if isinstance(arr, list):
+                return arr
+        except json.JSONDecodeError:
+            continue
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if match:
+        try:
+            arr = json.loads(match.group(0))
+            if isinstance(arr, list):
+                return arr
+        except json.JSONDecodeError:
+            pass
+    return []
 
 
 class LLMProcessor:
-    """Generates structured summaries from course text via OpenAI."""
+    """Generates structured summaries and utility outputs via OpenAI."""
 
     def invoke(self, system_prompt: str, user_message: str, api_key: str, temperature: float = 0.3) -> str:
-        """
-        Invoke the LLM with custom system and user messages.
-
-        Args:
-            system_prompt: System message.
-            user_message: User message.
-            api_key: OpenAI API key.
-            temperature: Optional temperature.
-
-        Returns:
-            Assistant response text.
-        """
         return _call_llm(system_prompt, user_message, api_key, temperature)
 
     def generate_summary(self, text: str, api_key: str) -> str:
-        """
-        Summarize course content into structured revision notes.
-
-        Args:
-            text: Raw course material text.
-            api_key: OpenAI API key.
-
-        Returns:
-            Markdown-formatted summary string.
-
-        Raises:
-            ValueError: If API key is missing, invalid, or quota insufficient.
-        """
         return _call_llm(SYSTEM_PROMPT, text, api_key, temperature=0.3)
 
     def generate_syllabus_checklist(self, text: str, api_key: str) -> dict[str, Any]:
-        """
-        Extract a revision syllabus with topics and exam priority (High/Medium/Low).
-
-        Args:
-            text: Raw course material text.
-            api_key: OpenAI API key.
-
-        Returns:
-            Dict with "module_title" and "topics" (list of {topic, priority, status}).
-            On parse failure returns {"module_title": "", "topics": []}.
-        """
-        raw = _call_llm(SYLLABUS_SYSTEM_PROMPT, text[:12000], api_key, temperature=0.3)
-        if not raw:
-            return {"module_title": "", "topics": []}
-        text_stripped = raw.strip()
-        if text_stripped.startswith("```"):
-            text_stripped = re.sub(r"^```(?:json)?\s*", "", text_stripped)
-            text_stripped = re.sub(r"\s*```\s*$", "", text_stripped).strip()
-        for candidate in [raw, text_stripped]:
-            try:
-                obj = json.loads(candidate)
-                break
-            except json.JSONDecodeError:
-                continue
-        else:
-            match = re.search(r"\{[\s\S]*\}", raw)
-            if match:
-                try:
-                    obj = json.loads(match.group(0))
-                except json.JSONDecodeError:
-                    obj = {}
-            else:
-                obj = {}
-        if not isinstance(obj, dict):
-            return {"module_title": "", "topics": []}
+        raw = _call_llm(SYLLABUS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3)
+        obj = _extract_json_object(raw)
         title = str(obj.get("module_title") or "").strip()
-        topics_raw = obj.get("topics")
+        topics_raw = obj.get("topics") if isinstance(obj, dict) else []
         if not isinstance(topics_raw, list):
-            return {"module_title": title, "topics": []}
+            topics_raw = []
         valid_priority = {"High", "Medium", "Low"}
+        frameworks_raw = obj.get("frameworks") if isinstance(obj, dict) else []
+        if not isinstance(frameworks_raw, list):
+            frameworks_raw = []
+
+        frameworks_out: list[dict[str, Any]] = []
+        flat_topics_from_tree: list[dict[str, str]] = []
+        for fw_idx, fw in enumerate(frameworks_raw):
+            if not isinstance(fw, dict):
+                continue
+            framework_name = str(
+                fw.get("framework") or fw.get("name") or fw.get("title") or f"Framework {fw_idx + 1}"
+            ).strip()
+            if not framework_name:
+                framework_name = f"Framework {fw_idx + 1}"
+            objective = str(fw.get("objective") or "").strip()
+            sections_raw = fw.get("sections") if isinstance(fw.get("sections"), list) else []
+            sections_out: list[dict[str, Any]] = []
+
+            for sec_idx, sec in enumerate(sections_raw):
+                if not isinstance(sec, dict):
+                    continue
+                section_name = str(sec.get("section") or sec.get("name") or f"Section {sec_idx + 1}").strip()
+                if not section_name:
+                    section_name = f"Section {sec_idx + 1}"
+                kps_raw = sec.get("knowledge_points") if isinstance(sec.get("knowledge_points"), list) else []
+                kps_out: list[dict[str, str]] = []
+                for kp_idx, kp in enumerate(kps_raw):
+                    if isinstance(kp, dict):
+                        point = str(kp.get("point") or kp.get("name") or kp.get("topic") or "").strip()
+                        detail = str(kp.get("detail") or kp.get("description") or "").strip()
+                        prio = str(kp.get("priority") or "Medium").strip()
+                        status = str(kp.get("status") or "Pending").strip() or "Pending"
+                    else:
+                        point = str(kp).strip()
+                        detail = ""
+                        prio = "Medium"
+                        status = "Pending"
+                    if not point:
+                        point = f"Knowledge Point {kp_idx + 1}"
+                    if prio not in valid_priority:
+                        prio = "Medium"
+                    kp_item = {"point": point, "detail": detail, "priority": prio, "status": status}
+                    kps_out.append(kp_item)
+                    flat_topics_from_tree.append(
+                        {
+                            "topic": f"{framework_name} / {section_name} / {point}",
+                            "priority": prio,
+                            "status": status,
+                        }
+                    )
+                sections_out.append({"section": section_name, "knowledge_points": kps_out})
+            frameworks_out.append({"framework": framework_name, "objective": objective, "sections": sections_out})
+
         topics_out: list[dict[str, str]] = []
         for t in topics_raw:
             if not isinstance(t, dict):
@@ -219,49 +222,43 @@ class LLMProcessor:
             prio = str(t.get("priority") or "Medium").strip()
             if prio not in valid_priority:
                 prio = "Medium"
-            topics_out.append({
-                "topic": topic_name,
-                "priority": prio,
-                "status": str(t.get("status") or "Pending").strip() or "Pending",
-            })
-        return {"module_title": title, "topics": topics_out}
+            status = str(t.get("status") or "Pending").strip() or "Pending"
+            topics_out.append({"topic": topic_name, "priority": prio, "status": status})
+
+        # Backward-compatible topics list; prefer tree-derived flatten when available.
+        if flat_topics_from_tree:
+            merged_topics = flat_topics_from_tree
+        else:
+            merged_topics = topics_out
+
+        # If model did not provide frameworks, synthesize a simple hierarchy from topics.
+        if not frameworks_out and topics_out:
+            frameworks_out = [
+                {
+                    "framework": "Core Framework",
+                    "objective": "",
+                    "sections": [
+                        {
+                            "section": "Key Topics",
+                            "knowledge_points": [
+                                {
+                                    "point": str(t.get("topic") or ""),
+                                    "detail": "",
+                                    "priority": str(t.get("priority") or "Medium"),
+                                    "status": str(t.get("status") or "Pending"),
+                                }
+                                for t in topics_out
+                            ],
+                        }
+                    ],
+                }
+            ]
+
+        return {"module_title": title, "frameworks": frameworks_out, "topics": merged_topics}
 
     def generate_flashcards(self, text: str, api_key: str) -> list[dict[str, str]]:
-        """
-        Extract 8-10 core terms/concepts/formulas as flashcard pairs (front, back).
-
-        Args:
-            text: Raw course material text.
-            api_key: OpenAI API key.
-
-        Returns:
-            List of {"front": "...", "back": "..."}. Back may contain LaTeX in $...$.
-            On parse failure returns [].
-        """
-        raw = _call_llm(FLASHCARDS_SYSTEM_PROMPT, text[:12000], api_key, temperature=0.3)
-        if not raw:
-            return []
-        text_stripped = raw.strip()
-        if text_stripped.startswith("```"):
-            text_stripped = re.sub(r"^```(?:json)?\s*", "", text_stripped)
-            text_stripped = re.sub(r"\s*```\s*$", "", text_stripped).strip()
-        for candidate in [raw, text_stripped]:
-            try:
-                arr = json.loads(candidate)
-                break
-            except json.JSONDecodeError:
-                continue
-        else:
-            match = re.search(r"\[[\s\S]*\]", raw)
-            if match:
-                try:
-                    arr = json.loads(match.group(0))
-                except json.JSONDecodeError:
-                    arr = []
-            else:
-                arr = []
-        if not isinstance(arr, list):
-            return []
+        raw = _call_llm(FLASHCARDS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3)
+        arr = _extract_json_array(raw)
         out: list[dict[str, str]] = []
         for item in arr[:10]:
             if not isinstance(item, dict):
@@ -269,40 +266,73 @@ class LLMProcessor:
             front = str(item.get("front") or "").strip()
             back = str(item.get("back") or "").strip()
             if front:
-                out.append({"front": front, "back": back or "—"})
+                out.append({"front": front, "back": back or "-"})
         return out
 
     def analyze_image(self, image_bytes: bytes, prompt: str, api_key: str) -> str:
-        """
-        Analyze a slide/screenshot with a vision model; explain content and exam relevance.
-
-        Args:
-            image_bytes: Raw image bytes (PNG or JPEG).
-            prompt: User prompt; if empty, uses default UNSW professor prompt.
-            api_key: OpenAI API key.
-
-        Returns:
-            Model response text (Markdown/LaTeX).
-
-        Raises:
-            ValueError: If API key is missing or API call fails.
-        """
         return _call_llm_vision(image_bytes, prompt.strip() or IMAGE_ANALYSIS_PROMPT, api_key)
 
     def chat_with_context(self, context: str, user_message: str, api_key: str) -> str:
-        """
-        Answer user question based on provided context (summary, syllabus, extracted text).
+        system = f"{CHAT_CONTEXT_PROMPT}\n\n[Context]\n{context[:20000]}"
+        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.4)
 
-        Args:
-            context: Concatenated course materials text.
-            user_message: User's question.
-            api_key: OpenAI API key.
+    def translate_question(self, question: str, options: list[str], api_key: str) -> dict[str, Any]:
+        """Translate one MCQ question and options into Chinese."""
+        if not (api_key and api_key.strip()):
+            return {"question_zh": "", "options_zh": []}
+        safe_options = [str(x) for x in options[:4]]
+        user_message = (
+            "Translate the following multiple-choice question into Simplified Chinese.\n"
+            "Keep technical terms accurate.\n"
+            f"Question: {question}\n"
+            f"Options: {json.dumps(safe_options, ensure_ascii=False)}"
+        )
+        try:
+            raw = _call_llm(TRANSLATE_QUESTION_PROMPT, user_message, api_key.strip(), temperature=0.0)
+        except ValueError:
+            return {"question_zh": "", "options_zh": []}
+        obj = _extract_json_object(raw)
+        question_zh = str(obj.get("question_zh") or "").strip()
+        options_zh_raw = obj.get("options_zh") if isinstance(obj, dict) else []
+        options_zh = options_zh_raw if isinstance(options_zh_raw, list) else []
+        out_options = [str(x) for x in options_zh[: len(safe_options)]]
+        return {"question_zh": question_zh, "options_zh": out_options}
 
-        Returns:
-            Assistant response text.
-
-        Raises:
-            ValueError: If API key is missing or API call fails.
-        """
-        system = f"{CHAT_CONTEXT_PROMPT}\n\n【资料】\n{context[:20000]}"
-        return _call_llm(system, f"用户问：{user_message}", api_key, temperature=0.4)
+    def translate_flashcard(
+        self,
+        stem: str,
+        options: list[str],
+        answer: str,
+        explanation: str,
+        api_key: str,
+    ) -> dict[str, Any]:
+        """Translate flashcard content into Chinese, preserving structure."""
+        if not (api_key and api_key.strip()):
+            return {"stem_zh": "", "options_zh": [], "answer_zh": "", "explanation_zh": ""}
+        payload = {
+            "stem": str(stem or ""),
+            "options": [str(x) for x in options],
+            "answer": str(answer or ""),
+            "explanation": str(explanation or ""),
+        }
+        try:
+            raw = _call_llm(
+                TRANSLATE_FLASHCARD_PROMPT,
+                json.dumps(payload, ensure_ascii=False),
+                api_key.strip(),
+                temperature=0.0,
+            )
+        except ValueError:
+            return {"stem_zh": "", "options_zh": [], "answer_zh": "", "explanation_zh": ""}
+        obj = _extract_json_object(raw)
+        stem_zh = str(obj.get("stem_zh") or "").strip()
+        options_zh_raw = obj.get("options_zh") if isinstance(obj.get("options_zh"), list) else []
+        options_zh = [str(x) for x in options_zh_raw[: len(options)]]
+        answer_zh = str(obj.get("answer_zh") or "").strip()
+        explanation_zh = str(obj.get("explanation_zh") or "").strip()
+        return {
+            "stem_zh": stem_zh,
+            "options_zh": options_zh,
+            "answer_zh": answer_zh,
+            "explanation_zh": explanation_zh,
+        }

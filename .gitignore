@@ -37,3 +37,5 @@ Thumbs.db
 backups/
 data/app.db
 data/chroma/
+src/data/app.db
+src/data/chroma/

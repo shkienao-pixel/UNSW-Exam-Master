@@ -14,6 +14,23 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from migrations.migrate import DB_PATH, latest_migration_version, migrate_to_latest
+from services.course_workspace_service import (
+    create_course,
+    create_deck,
+    create_output,
+    create_scope_set,
+    ensure_default_scope_set,
+    list_artifacts,
+    list_cards,
+    list_courses,
+    list_decks,
+    list_outputs,
+    list_scope_set_artifact_ids,
+    list_scope_sets,
+    replace_scope_set_items,
+    save_artifact,
+    replace_vocab_cards,
+)
 from services.vector_store_service import DocumentVectorStore
 
 
@@ -48,9 +65,69 @@ def check_vector_metadata_mismatch() -> None:
             pass
 
 
+def check_workspace_tables_and_crud() -> None:
+    expected_tables = {"courses", "artifacts", "outputs", "decks", "cards", "scope_sets", "scope_set_items"}
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        tables = {str(r[0]) for r in rows}
+        missing = expected_tables - tables
+        assert not missing, f"missing workspace tables: {sorted(missing)}"
+    finally:
+        conn.close()
+
+    unique_code = f"SC{uuid.uuid4().hex[:6].upper()}"
+    course = create_course(unique_code, "Self Check Course")
+    course_id = str(course["id"])
+    assert any(c["id"] == course_id for c in list_courses()), "course create/list failed"
+
+    out_id = create_output(course_id, "summary", "self check output")
+    assert out_id > 0, "output insert failed"
+    outputs = list_outputs(course_id)
+    assert any(int(o["id"]) == out_id for o in outputs), "output list failed"
+    created = next((o for o in outputs if int(o["id"]) == out_id), None)
+    assert created is not None, "created output missing"
+    assert "output_type" in created, "output_type column not surfaced"
+    assert "scope_artifact_ids" in created, "scope_artifact_ids column not surfaced"
+    assert "model_used" in created, "model_used column not surfaced"
+
+    artifact = save_artifact(course_id, "selfcheck.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")
+    aid = int(artifact["id"])
+    default_scope = ensure_default_scope_set(course_id)
+    assert default_scope.get("is_default") == 1, "default scope set missing"
+    assert aid in (default_scope.get("artifact_ids") or []), "default scope set not synced with artifacts"
+
+    custom_scope_id = create_scope_set(course_id, "Week 1")
+    replace_scope_set_items(custom_scope_id, [aid])
+    custom_items = list_scope_set_artifact_ids(custom_scope_id)
+    assert custom_items == [aid], "scope_set_items replace/list failed"
+    assert any(int(s["id"]) == custom_scope_id for s in list_scope_sets(course_id)), "scope_sets list failed"
+
+    out_quiz_id = create_output(
+        course_id,
+        "quiz",
+        "{\"quiz_title\":\"t\",\"questions\":[]}",
+        scope_artifact_ids=[aid],
+        scope_set_id=custom_scope_id,
+    )
+    assert out_quiz_id > 0, "quiz output insert failed"
+    quiz_out = next((o for o in list_outputs(course_id) if int(o["id"]) == out_quiz_id), None)
+    assert quiz_out is not None, "quiz output missing"
+    assert quiz_out.get("scope_artifact_ids") == [aid], "scope_artifact_ids mismatch"
+    assert int(quiz_out.get("scope_set_id") or 0) == custom_scope_id, "scope_set_id mismatch"
+
+    deck_id = create_deck(course_id, "Self Check Deck", "vocab")
+    assert deck_id > 0, "deck insert failed"
+    assert any(int(d["id"]) == deck_id for d in list_decks(course_id)), "deck list failed"
+    inserted = replace_vocab_cards(deck_id, course_id, [{"front": "A", "back": "B"}])
+    assert inserted == 1, "card replace failed"
+    assert len(list_cards(deck_id)) == 1, "card list failed"
+
+
 def main() -> None:
     check_migrations_idempotent()
     check_vector_metadata_mismatch()
+    check_workspace_tables_and_crud()
     print("self_check: OK")
 
 

@@ -1,6 +1,8 @@
-"""
+﻿"""
 Exam logic: generate and validate quiz JSON from course content.
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -9,11 +11,27 @@ from typing import Any
 from services.llm_service import LLMProcessor
 
 QUIZ_SYSTEM_PROMPT = (
-    "你是一个 UNSW 考试出题助手。根据用户提供的课程文本，生成指定数量的单选题。"
-    "你必须只输出一个合法的 JSON 对象，不要用 markdown 代码块包裹，不要输出任何 JSON 以外的文字。"
-    "JSON 结构必须严格如下（注意字段名和类型）：\n"
-    '{"quiz_title": "字符串", "questions": [{"id": 1, "type": "MCQ", "question": "题目文本", '
-    '"options": ["A", "B", "C", "D"], "correct_answer": "正确选项的完整文本", "explanation": "解析说明"}]}'
+    "You are a UNSW exam question writer. "
+    "Return ONLY valid JSON (no markdown, no extra text). "
+    "Generate MCQ questions from the provided course content with exactly 4 options each. "
+    "JSON schema:\n"
+    "{\n"
+    '  "quiz_title": "string",\n'
+    '  "questions": [\n'
+    "    {\n"
+    '      "id": 1,\n'
+    '      "type": "MCQ",\n'
+    '      "question": "string",\n'
+    '      "options": ["A", "B", "C", "D"],\n'
+    '      "correct_answer": "string",\n'
+    '      "explanation": "string",\n'
+    '      "answer_en": "string",\n'
+    '      "answer_zh": "string",\n'
+    '      "explanation_en": "string",\n'
+    '      "explanation_zh": "string"\n'
+    "    }\n"
+    "  ]\n"
+    "}"
 )
 
 EMPTY_QUIZ: dict[str, Any] = {"quiz_title": "", "questions": []}
@@ -59,14 +77,19 @@ def _validate_quiz(obj: Any) -> dict[str, Any]:
     for i, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
-        out_questions.append({
+        normalized = {
             "id": q.get("id", i + 1),
             "type": q.get("type", "MCQ"),
             "question": str(q.get("question", "")),
             "options": list(q.get("options", [])) if isinstance(q.get("options"), list) else [],
             "correct_answer": str(q.get("correct_answer", "")),
             "explanation": str(q.get("explanation", "")),
-        })
+            "answer_en": str(q.get("answer_en", q.get("correct_answer", ""))),
+            "answer_zh": str(q.get("answer_zh", "")),
+            "explanation_en": str(q.get("explanation_en", q.get("explanation", ""))),
+            "explanation_zh": str(q.get("explanation_zh", "")),
+        }
+        out_questions.append(normalized)
     return {"quiz_title": str(title) if title else "", "questions": out_questions}
 
 
@@ -91,10 +114,15 @@ class QuizGenerator:
         """
         if not (api_key and api_key.strip()):
             return EMPTY_QUIZ.copy()
+        safe_num = max(1, min(int(num_questions), 50))
         user_message = (
-            f"请根据以下课程内容，生成恰好 {num_questions} 道单选题。"
-            "每道题必须有 4 个选项，correct_answer 为正确选项的完整文本，explanation 为解析。\n\n"
-            f"{text[:12000]}"
+            f"Generate exactly {safe_num} MCQ questions from the following scope-limited course text.\n"
+            "Requirements:\n"
+            "- Exactly 4 options per question.\n"
+            "- Include correct_answer and explanation.\n"
+            "- Also include bilingual fields: answer_en, answer_zh, explanation_en, explanation_zh.\n"
+            "- Keep explanations concise and exam-focused.\n\n"
+            f"{text[:30000]}"
         )
         try:
             raw = self._llm.invoke(
