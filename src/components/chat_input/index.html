@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 2px 2px 6px;
+  }
+
+  #box {
+    border: 1.5px solid #d1d5db;
+    border-radius: 14px;
+    background: #fff;
+    overflow: hidden;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  #box.active {
+    border-color: #FFCC00;
+    box-shadow: 0 0 0 3px rgba(255,204,0,0.18);
+  }
+
+  /* Image preview row */
+  #img-row {
+    display: none;
+    padding: 10px 12px 0;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  #img-row.show { display: flex; }
+  #img-wrap { position: relative; display: inline-flex; }
+  #thumb {
+    width: 64px; height: 64px;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+    object-fit: cover;
+  }
+  #rm-btn {
+    position: absolute;
+    top: -6px; right: -6px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: #374151;
+    color: #fff;
+    border: 2px solid #fff;
+    font-size: 10px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    line-height: 1;
+    padding: 0;
+  }
+  #rm-btn:hover { background: #dc2626; }
+
+  /* Input row */
+  #input-row {
+    display: flex;
+    align-items: flex-end;
+    padding: 4px 8px 6px 14px;
+    gap: 6px;
+  }
+  #ta {
+    flex: 1;
+    border: none;
+    outline: none;
+    resize: none;
+    font-size: 14px;
+    font-family: inherit;
+    color: #111827;
+    background: transparent;
+    line-height: 1.55;
+    padding: 8px 0;
+    min-height: 40px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  #ta::placeholder { color: #9ca3af; }
+
+  #send {
+    flex-shrink: 0;
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    border: none;
+    background: #1f2937;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  #send:disabled { background: #e5e7eb; cursor: default; }
+  #send:not(:disabled):hover { background: #374151; }
+  #send svg { width: 15px; height: 15px; }
+</style>
+</head>
+<body>
+<div id="box">
+  <div id="img-row">
+    <div id="img-wrap">
+      <img id="thumb" src="" alt=""/>
+      <button id="rm-btn">✕</button>
+    </div>
+  </div>
+  <div id="input-row">
+    <textarea id="ta" rows="1" placeholder="发送消息，或 Ctrl+V 粘贴截图…"></textarea>
+    <button id="send" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"
+           stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="19" x2="12" y2="5"/>
+        <polyline points="5 12 12 5 19 12"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script>
+var imgB64 = null;
+var lastH = 0;
+
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+// Only report height when it actually changes — NO setInterval
+function reportH() {
+  var h = document.getElementById('box').offsetHeight + 10;
+  if (h !== lastH && h > 10) {
+    lastH = h;
+    window.parent.postMessage({ type: 'streamlit:setFrameHeight', height: h }, '*');
+  }
+}
+
+function updateSend() {
+  var ta = document.getElementById('ta');
+  document.getElementById('send').disabled = !(ta.value.trim() || imgB64);
+}
+
+function showImg(dataUrl) {
+  imgB64 = dataUrl.split(',')[1];
+  document.getElementById('thumb').src = dataUrl;
+  document.getElementById('img-row').classList.add('show');
+  updateSend();
+  reportH();
+}
+
+function clearImg() {
+  imgB64 = null;
+  document.getElementById('thumb').src = '';
+  document.getElementById('img-row').classList.remove('show');
+  updateSend();
+  reportH();
+}
+
+function doSend() {
+  var ta = document.getElementById('ta');
+  var text = ta.value.trim();
+  if (!text && !imgB64) return;
+  window.parent.postMessage({
+    type: 'streamlit:setComponentValue',
+    dataType: 'json',
+    value: { text: text, imageB64: imgB64, submitId: uid() }
+  }, '*');
+  ta.value = '';
+  ta.style.height = '';
+  clearImg();
+  updateSend();
+  reportH();
+}
+
+// Textarea events
+var ta = document.getElementById('ta');
+var box = document.getElementById('box');
+
+ta.addEventListener('focus', function() { box.classList.add('active'); });
+ta.addEventListener('blur',  function() { box.classList.remove('active'); });
+
+ta.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 180) + 'px';
+  updateSend();
+  reportH();
+});
+
+ta.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+});
+
+// Paste: capture image, let text paste fall through naturally
+document.addEventListener('paste', function(e) {
+  var items = (e.clipboardData || window.clipboardData || {}).items || [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf('image') !== -1) {
+      e.preventDefault();
+      var blob = items[i].getAsFile();
+      var reader = new FileReader();
+      reader.onload = function(ev) { showImg(ev.target.result); };
+      reader.readAsDataURL(blob);
+      return;
+    }
+  }
+});
+
+document.getElementById('rm-btn').addEventListener('click', clearImg);
+document.getElementById('send').addEventListener('click', doSend);
+
+// Report height only on load — no polling
+window.addEventListener('load', function() {
+  reportH();
+  // One retry in case layout hasn't settled
+  setTimeout(reportH, 200);
+});
+</script>
+</body>
+</html>

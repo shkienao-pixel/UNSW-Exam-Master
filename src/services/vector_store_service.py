@@ -208,14 +208,38 @@ class DocumentVectorStore:
             "chunks_added": chunks_added,
         }
 
+    def _count_course_chunks(self) -> int:
+        """Return number of indexed chunks for current course."""
+        try:
+            res = self.collection.get(
+                where={"course_id": self.course_id},
+                include=["metadatas"],
+            )
+            return len(res.get("ids") or [])
+        except Exception:
+            return 0
+
     def search(self, query: str, api_key: str, top_k: int = 8) -> list[dict[str, Any]]:
-        """Retrieve top-k relevant chunks for the current course collection."""
+        """Retrieve top-k relevant chunks for the current course collection.
+
+        Raises ValueError with a human-readable message on API or index errors
+        so callers can surface it to the user rather than silently falling back.
+        Distance threshold of 0.82 filters out semantically unrelated chunks.
+        """
         if not query or not query.strip():
             return []
+
         query_embedding = self._embed_query(api_key, query)
+
+        # Chroma raises if n_results > total indexed items — cap to actual count
+        total = self._count_course_chunks()
+        if total == 0:
+            return []
+        n = min(max(1, top_k), total)
+
         result = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=max(1, top_k),
+            n_results=n,
             where={"course_id": self.course_id},
             include=["documents", "metadatas", "distances"],
         )

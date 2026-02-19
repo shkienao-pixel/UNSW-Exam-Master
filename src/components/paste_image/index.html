@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 4px 6px; background: transparent; }
+  #paste-zone {
+    border: 1.5px dashed #D1D5DB;
+    border-radius: 8px;
+    padding: 10px 14px;
+    text-align: center;
+    cursor: pointer;
+    background: #F9FAFB;
+    outline: none;
+    transition: border-color 0.2s, background 0.2s;
+    user-select: none;
+    font-size: 13px;
+    color: #9CA3AF;
+    line-height: 1.4;
+  }
+  #paste-zone:focus, #paste-zone.focused {
+    border-color: #FFCC00;
+    background: #FFFEF0;
+    color: #374151;
+  }
+  #paste-zone.has-image {
+    border-color: #10B981;
+    background: #F0FDF4;
+    color: #065F46;
+    border-style: solid;
+  }
+  #preview-wrap { display: none; margin-top: 6px; display: none; align-items: center; gap: 10px; padding: 0 2px; }
+  #preview-img { max-height: 64px; max-width: 100px; border-radius: 5px; border: 1px solid #E5E7EB; object-fit: cover; flex-shrink: 0; }
+  #btn-row { display: none; margin-top: 6px; gap: 6px; justify-content: flex-end; }
+  #submit-btn {
+    padding: 5px 14px;
+    background: #FFCC00;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 12px;
+    color: #1a1a1a;
+    transition: background 0.15s;
+  }
+  #submit-btn:hover { background: #E6B800; }
+  #clear-btn {
+    padding: 5px 10px;
+    background: #F3F4F6;
+    border: 1px solid #E5E7EB;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #6B7280;
+  }
+  #clear-btn:hover { background: #E5E7EB; }
+</style>
+</head>
+<body>
+<div id="paste-zone" tabindex="0">📋 点击后 <strong>Ctrl+V</strong> 粘贴截图</div>
+<div id="preview-wrap">
+  <img id="preview-img" src="" alt=""/>
+  <span id="preview-label" style="font-size:12px;color:#065F46;">图片已准备</span>
+</div>
+<div id="btn-row">
+  <button id="clear-btn">✕ 清除</button>
+  <button id="submit-btn">🔍 分析图片</button>
+</div>
+
+<script>
+var pastedB64 = null;
+
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function setHeight(h) {
+  window.parent.postMessage({ type: 'streamlit:setFrameHeight', height: h }, '*');
+}
+
+function resetState() {
+  pastedB64 = null;
+  var zone = document.getElementById('paste-zone');
+  zone.className = '';
+  zone.innerHTML = '📋 点击后 <strong>Ctrl+V</strong> 粘贴截图';
+  document.getElementById('preview-wrap').style.display = 'none';
+  document.getElementById('preview-img').src = '';
+  document.getElementById('btn-row').style.display = 'none';
+  setHeight(46);
+}
+
+function handleImageData(dataUrl) {
+  pastedB64 = dataUrl.split(',')[1];
+  var img = document.getElementById('preview-img');
+  img.src = dataUrl;
+  document.getElementById('preview-wrap').style.display = 'flex';
+  document.getElementById('btn-row').style.display = 'flex';
+  var zone = document.getElementById('paste-zone');
+  zone.className = 'has-image';
+  zone.innerHTML = '✅ 图片已捕获';
+  setHeight(130);
+}
+
+document.addEventListener('paste', function(e) {
+  var items = (e.clipboardData || window.clipboardData || {}).items;
+  if (!items) return;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf('image') !== -1) {
+      e.preventDefault();
+      var blob = items[i].getAsFile();
+      var reader = new FileReader();
+      reader.onload = function(ev) { handleImageData(ev.target.result); };
+      reader.readAsDataURL(blob);
+      break;
+    }
+  }
+});
+
+var zone = document.getElementById('paste-zone');
+zone.addEventListener('click', function() { this.focus(); this.classList.add('focused'); });
+zone.addEventListener('blur', function() { if (!pastedB64) this.classList.remove('focused'); });
+
+document.getElementById('submit-btn').addEventListener('click', function() {
+  if (!pastedB64) return;
+  var sid = uid();
+  window.parent.postMessage({
+    type: 'streamlit:setComponentValue',
+    value: { type: 'image', data: pastedB64, submitId: sid },
+    dataType: 'json'
+  }, '*');
+  // Reset immediately so next rerun returns null
+  resetState();
+});
+
+document.getElementById('clear-btn').addEventListener('click', function() {
+  window.parent.postMessage({
+    type: 'streamlit:setComponentValue',
+    value: null,
+    dataType: 'json'
+  }, '*');
+  resetState();
+});
+
+window.addEventListener('load', function() { setHeight(46); });
+</script>
+</body>
+</html>

@@ -41,6 +41,14 @@ CHAT_CONTEXT_PROMPT = (
     "If the answer cannot be derived from context, say so explicitly."
 )
 
+CHAT_GENERAL_PROMPT = (
+    "You are a knowledgeable UNSW teaching assistant. "
+    "The user's question is not covered by the uploaded course materials. "
+    "Draw on your broad academic knowledge to give a thorough, accurate answer. "
+    "If you reference anything beyond the course docs, note it comes from general knowledge. "
+    "Answer in the same language as the user's question (Chinese if they wrote in Chinese)."
+)
+
 TRANSLATE_QUESTION_PROMPT = (
     "You are a precise technical translator. Return only valid JSON with this schema: "
     '{"question_zh":"...","options_zh":["...","...","...","..."]}. '
@@ -275,6 +283,13 @@ class LLMProcessor:
     def chat_with_context(self, context: str, user_message: str, api_key: str) -> str:
         system = f"{CHAT_CONTEXT_PROMPT}\n\n[Context]\n{context[:20000]}"
         return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.4)
+
+    def chat_general_knowledge(self, user_message: str, api_key: str, extra_context: str = "") -> str:
+        """Answer from general knowledge when vector search returns no relevant chunks."""
+        system = CHAT_GENERAL_PROMPT
+        if extra_context:
+            system = f"{CHAT_GENERAL_PROMPT}\n\n[Course Background (partial)]\n{extra_context[:8000]}"
+        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.5)
 
     def translate_question(self, question: str, options: list[str], api_key: str) -> dict[str, Any]:
         """Translate one MCQ question and options into Chinese."""

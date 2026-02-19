@@ -6,12 +6,12 @@ import json
 import random
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Any
 from uuid import uuid4
 
 import streamlit as st
-from streamlit_echarts import st_echarts
+import streamlit.components.v1 as components
 
 from config import (
     MOTIVATIONAL_QUOTES,
@@ -37,8 +37,9 @@ from migrations.migrate import (
     MigrationInProgressError,
     migrate_to_latest,
 )
+from services.content_guard_service import ContentGuard
 from services.document_processor import PDFProcessor
-from services.graph_service import GraphGenerator
+from services.graph_service import GraphGenerator, is_legacy_graph_format, flat_graph_to_tree
 from services.llm_service import LLMProcessor
 from services.quiz_generator import QuizGenerator
 from services.course_workspace_service import (
@@ -75,6 +76,14 @@ from services.flashcards_mistakes_service import (
 
 _MIGRATIONS_DONE = False
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_paste_image_component = components.declare_component(
+    "paste_image",
+    path=str(Path(__file__).parent / "components" / "paste_image"),
+)
+_chat_input_component = components.declare_component(
+    "chat_input",
+    path=str(Path(__file__).parent / "components" / "chat_input"),
+)
 ROUTE_TO_PAGE: dict[str, str] = {
     "/dashboard": "dashboard",
     "/study": "study",
@@ -83,6 +92,7 @@ ROUTE_TO_PAGE: dict[str, str] = {
     "/quiz": "quiz",
     "/flashcards": "flashcards",
     "/mistakes": "mistakes",
+    "/rag": "rag",
 }
 PAGE_TO_ROUTE: dict[str, str] = {v: k for k, v in ROUTE_TO_PAGE.items()}
 
@@ -225,157 +235,362 @@ def _ensure_migrations_once() -> int:
 
 
 def _inject_unsw_css() -> None:
-    """Inject UNSW style CSS."""
+    """Inject UNSW style CSS — modern redesign."""
     st.markdown(
         f"""
         <style>
-        .unsw-header {{
-            background: {UNSW_PRIMARY};
-            clip-path: polygon(0 0, 100% 0, 100% 84%, 0 100%);
-            height: 80px;
-            margin: 0 -2rem 1rem -2rem;
-            padding: 0 0 0 2rem;
-            display: flex;
-            align-items: center;
-            width: calc(100% + 4rem);
-            box-sizing: border-box;
-        }}
-        .unsw-logo {{
-            font-family: {UNSW_FONT_HEADING};
-            font-weight: 900;
-            font-size: 1.6rem;
-            line-height: 1;
-            letter-spacing: 0.2em;
-            color: #000;
-        }}
-        .stApp {{ background: {UNSW_BG_PAGE}; }}
+        /* ===== UNSW EXAM MASTER — MODERN UI ===== */
+
+        /* Page background */
+        .stApp {{ background: #F0F2F6 !important; }}
+
+        /* Main content area — transparent, no extra card */
         .main .block-container {{
-            padding: 1.5rem 2rem;
-            max-width: 100%;
-            background: {UNSW_CARD_BG};
-            box-shadow: {UNSW_CARD_SHADOW};
-            border-radius: 6px;
+            padding: 1.25rem 2rem !important;
+            max-width: 100% !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
         }}
-        h1, h2, h3 {{
-            font-family: {UNSW_FONT_HEADING} !important;
-            letter-spacing: 0.03em !important;
-            color: {UNSW_TEXT} !important;
+
+        /* Headings */
+        h1 {{
+            font-weight: 900 !important;
+            font-size: 1.9rem !important;
+            color: #1E2433 !important;
+            letter-spacing: -0.02em !important;
         }}
-        p, .stMarkdown {{ color: {UNSW_TEXT} !important; }}
+        h2 {{
+            font-weight: 700 !important;
+            font-size: 1.4rem !important;
+            color: #1E2433 !important;
+        }}
+        h3 {{
+            font-weight: 600 !important;
+            color: #374151 !important;
+        }}
+        p, .stMarkdown {{ color: #374151 !important; line-height: 1.6 !important; }}
+
+        /* ===== SIDEBAR ===== */
         [data-testid="stSidebar"] {{
-            background: {UNSW_SIDEBAR_BG};
-            border-right: 1px solid {UNSW_SIDEBAR_BORDER};
+            background: linear-gradient(180deg, #0D1117 0%, #111827 100%) !important;
+            border-right: 1px solid #1F2937 !important;
         }}
         [data-testid="stSidebar"] .stMarkdown,
         [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] .stCaptionContainer,
-        [data-testid="stSidebar"] small {{ color: {UNSW_SIDEBAR_TEXT} !important; }}
+        [data-testid="stSidebar"] small {{ color: #9CA3AF !important; }}
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {{ color: #F9FAFB !important; }}
+
+        /* Sidebar nav buttons */
         [data-testid="stSidebar"] .stButton > button {{
-            border-radius: 4px !important;
-            min-height: 2.1rem !important;
+            background: rgba(255,255,255,0.05) !important;
+            color: #D1D5DB !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            border-radius: 8px !important;
+            font-weight: 500 !important;
+            min-height: 2.25rem !important;
+            transition: all 0.18s ease !important;
         }}
         [data-testid="stSidebar"] .stButton > button[kind="primary"] {{
-            background: #FFFFFF !important;
-            color: #111111 !important;
-            border: 1px solid #D0D0D0 !important;
+            background: rgba(255,204,0,0.14) !important;
+            color: #FFD84D !important;
+            border: 1px solid rgba(255,204,0,0.28) !important;
+            font-weight: 700 !important;
         }}
         [data-testid="stSidebar"] .stButton > button[kind="primary"] *,
         [data-testid="stSidebar"] .stButton > button[kind="secondary"] * {{
-            color: #111111 !important;
-            -webkit-text-fill-color: #111111 !important;
+            color: inherit !important;
+            -webkit-text-fill-color: inherit !important;
         }}
-        [data-testid="stSidebar"] .stButton > button[kind="secondary"] {{
-            background: #FFFFFF !important;
-            color: #111111 !important;
-            border: 1px solid #D0D0D0 !important;
+        [data-testid="stSidebar"] .stButton > button:hover {{
+            background: rgba(255,255,255,0.10) !important;
+            border-color: rgba(255,255,255,0.16) !important;
+            color: #F9FAFB !important;
         }}
         [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {{
-            background: #F3F4F6 !important;
-            color: #111111 !important;
-            border: 1px solid #BDBDBD !important;
-        }}
-        [data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {{
-            background: #F3F4F6 !important;
-            color: #111111 !important;
-            border: 1px solid #BDBDBD !important;
+            background: rgba(255,204,0,0.22) !important;
+            color: #FFE066 !important;
         }}
         [data-testid="stSidebar"] .stButton > button:disabled {{
-            background: #FFFFFF !important;
-            color: #111111 !important;
-            border: 1px solid #D0D0D0 !important;
-            opacity: 1 !important;
-            -webkit-text-fill-color: #111111 !important;
+            opacity: 0.45 !important;
         }}
         [data-testid="stSidebar"] .stButton > button:disabled * {{
-            color: #111111 !important;
-            -webkit-text-fill-color: #111111 !important;
-            opacity: 1 !important;
+            color: inherit !important;
+            -webkit-text-fill-color: inherit !important;
         }}
+
+        /* Sidebar download button */
         [data-testid="stSidebar"] .stDownloadButton > button {{
-            background: #FFFFFF !important;
-            color: #111111 !important;
-            border: 1px solid #D0D0D0 !important;
-            border-radius: 4px !important;
+            background: rgba(255,255,255,0.06) !important;
+            color: #D1D5DB !important;
+            border: 1px solid rgba(255,255,255,0.10) !important;
+            border-radius: 8px !important;
             min-height: 2.1rem !important;
-            font-weight: 600 !important;
+            font-weight: 500 !important;
         }}
         [data-testid="stSidebar"] .stDownloadButton > button:hover {{
-            background: #F3F4F6 !important;
-            color: #111111 !important;
-            border: 1px solid #BDBDBD !important;
+            background: rgba(255,255,255,0.12) !important;
+            color: #F9FAFB !important;
         }}
+
+        /* Sidebar text input (API key) */
+        [data-testid="stSidebar"] .stTextInput input {{
+            background: rgba(255,255,255,0.07) !important;
+            border: 1px solid rgba(255,255,255,0.14) !important;
+            color: #E5E7EB !important;
+            border-radius: 8px !important;
+        }}
+        [data-testid="stSidebar"] .stTextInput input::placeholder {{
+            color: #6B7280 !important;
+        }}
+
+        /* Sidebar expander */
+        [data-testid="stSidebar"] details summary {{
+            color: #9CA3AF !important;
+        }}
+
+        /* ===== MAIN BUTTONS ===== */
         .stButton > button {{
             background: {UNSW_PRIMARY} !important;
-            color: {UNSW_TEXT} !important;
+            color: #1E2433 !important;
             border: none !important;
-            border-radius: 4px;
-            font-weight: 600;
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-        }}
-        .stButton > button[kind="secondary"] {{
-            background: #FFFFFF !important;
-            color: {UNSW_TEXT} !important;
-            border: 1px solid #D0D0D0 !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            font-size: 0.9rem !important;
+            transition: all 0.18s ease !important;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.10) !important;
         }}
         .stButton > button:hover {{
             background: {UNSW_PRIMARY_HOVER} !important;
-            color: {UNSW_TEXT} !important;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+            color: #1E2433 !important;
+            transform: translateY(-1px) !important;
+            box-shadow: 0 4px 14px rgba(255,204,0,0.32) !important;
+        }}
+        .stButton > button[kind="secondary"] {{
+            background: #FFFFFF !important;
+            color: #374151 !important;
+            border: 1px solid #E5E7EB !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
         }}
         .stButton > button[kind="secondary"]:hover {{
-            background: #F7F7F7 !important;
-            color: {UNSW_TEXT} !important;
-            border: 1px solid #BDBDBD !important;
-            transform: translateY(-1px);
+            background: #F9FAFB !important;
+            border-color: #D1D5DB !important;
+            color: #1E2433 !important;
+            transform: translateY(-1px) !important;
+            box-shadow: 0 3px 8px rgba(0,0,0,0.08) !important;
         }}
-        .stProgress > div > div > div {{ background: {UNSW_PRIMARY}; }}
-        .sidebar-header {{
-            font-family: {UNSW_FONT_HEADING};
-            font-size: 0.9rem;
-            font-weight: 700;
+        .stButton > button:disabled {{
+            opacity: 0.42 !important;
+            transform: none !important;
+            box-shadow: none !important;
+        }}
+
+        /* Download button */
+        .stDownloadButton > button {{
+            background: #FFFFFF !important;
+            color: #374151 !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 8px !important;
+        }}
+        .stDownloadButton > button:hover {{
+            background: #F9FAFB !important;
+            border-color: #D1D5DB !important;
+        }}
+
+        /* ===== PROGRESS BAR ===== */
+        .stProgress > div > div > div {{
+            background: linear-gradient(90deg, {UNSW_PRIMARY}, #FF9900) !important;
+            border-radius: 999px !important;
+        }}
+        .stProgress > div > div {{
+            background: #E5E7EB !important;
+            border-radius: 999px !important;
+        }}
+
+        /* ===== TABS ===== */
+        .stTabs [data-baseweb="tab-list"] {{
+            border-bottom: 2px solid #E5E7EB !important;
+            gap: 0 !important;
+            background: transparent !important;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            color: #6B7280 !important;
+            font-weight: 500 !important;
+            padding: 0.7rem 1.25rem !important;
+            border-radius: 0 !important;
+            border-bottom: 2px solid transparent !important;
+            margin-bottom: -2px !important;
+            background: transparent !important;
+        }}
+        .stTabs [aria-selected="true"] {{
+            color: #1E2433 !important;
+            border-bottom: 2px solid {UNSW_PRIMARY} !important;
+            font-weight: 700 !important;
+            background: transparent !important;
+        }}
+
+        /* ===== CONTAINERS / CARDS ===== */
+        [data-testid="stVerticalBlockBorderWrapper"] {{
+            border: 1px solid #E5E7EB !important;
+            border-radius: 12px !important;
+            background: #FFFFFF !important;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+        }}
+
+        /* ===== METRICS ===== */
+        [data-testid="stMetric"] {{
+            background: #FFFFFF !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 12px !important;
+            padding: 1rem 1.25rem !important;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
+        }}
+        [data-testid="stMetricLabel"] {{ color: #6B7280 !important; font-size: 0.78rem !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: 0.05em !important; }}
+        [data-testid="stMetricValue"] {{ color: #1E2433 !important; font-weight: 800 !important; font-size: 1.6rem !important; }}
+
+        /* ===== ALERTS ===== */
+        .stSuccess {{ background: #D1FAE5 !important; border: 1px solid #34D399 !important; border-radius: 8px !important; color: #065F46 !important; }}
+        .stWarning {{ background: #FEF3C7 !important; border: 1px solid #FCD34D !important; border-radius: 8px !important; color: #92400E !important; }}
+        .stError   {{ background: #FEE2E2 !important; border: 1px solid #FCA5A5 !important; border-radius: 8px !important; color: #991B1B !important; }}
+        .stInfo    {{ background: #DBEAFE !important; border: 1px solid #93C5FD !important; border-radius: 8px !important; color: #1E40AF !important; }}
+
+        /* ===== FILE UPLOADER ===== */
+        [data-testid="stFileUploader"] {{
+            border: 2px dashed #D1D5DB !important;
+            border-radius: 12px !important;
+            background: #F9FAFB !important;
+        }}
+
+        /* ===== TEXT INPUT ===== */
+        .stTextInput input {{
+            border-radius: 8px !important;
+            border-color: #E5E7EB !important;
+        }}
+        .stTextInput input:focus {{
+            border-color: {UNSW_PRIMARY} !important;
+            box-shadow: 0 0 0 3px rgba(255,204,0,0.18) !important;
+        }}
+
+        /* ===== EXPANDER ===== */
+        .streamlit-expanderHeader {{
+            background: #F9FAFB !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            color: #374151 !important;
+        }}
+
+        /* ===== DIVIDER ===== */
+        hr {{ border-color: #E5E7EB !important; margin: 1rem 0 !important; }}
+
+        /* ===== CUSTOM CLASSES ===== */
+
+        /* Dashboard hero banner */
+        .dashboard-hero {{
+            background: linear-gradient(135deg, #1E2433 0%, #2D3748 100%);
+            border-radius: 16px;
+            padding: 2rem 2.5rem;
+            margin-bottom: 1.5rem;
+            border-left: 5px solid {UNSW_PRIMARY};
+            box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+        }}
+        .dashboard-hero-title {{
+            color: #FFFFFF !important;
+            font-size: 1.9rem !important;
+            font-weight: 900 !important;
+            margin: 0 0 0.35rem 0 !important;
+            letter-spacing: -0.02em;
+        }}
+        .dashboard-hero-tagline {{
+            color: rgba(255,255,255,0.65) !important;
+            font-size: 1rem !important;
+            margin: 0 !important;
+        }}
+        .hero-badge {{
+            display: inline-block;
+            background: rgba(255,204,0,0.15);
+            border: 1px solid rgba(255,204,0,0.32);
             color: {UNSW_PRIMARY};
-            letter-spacing: 0.08em;
-            margin-bottom: 1rem;
+            font-size: 0.72rem;
+            font-weight: 700;
+            padding: 0.2rem 0.7rem;
+            border-radius: 999px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-bottom: 0.75rem;
+        }}
+
+        /* Sidebar header label */
+        .sidebar-header {{
+            font-size: 0.72rem;
+            font-weight: 800;
+            color: {UNSW_PRIMARY};
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            margin-bottom: 0.75rem;
             padding-bottom: 0.5rem;
-            border-bottom: 1px solid {UNSW_SIDEBAR_BORDER};
+            border-bottom: 1px solid #1F2937;
         }}
+
+        /* Motivational quote */
         .quote-box {{
-            background: rgba(255,255,255,0.06);
-            border-left: 4px solid {UNSW_PRIMARY};
-            padding: 0.75rem 1rem;
-            border-radius: 0 4px 4px 0;
-            color: rgba(255,255,255,0.9);
+            background: rgba(255,204,0,0.07);
+            border-left: 3px solid {UNSW_PRIMARY};
+            padding: 0.875rem 1rem;
+            border-radius: 0 8px 8px 0;
+            color: rgba(255,255,255,0.78);
             font-size: 0.85rem;
+            font-style: italic;
             margin-top: 1rem;
+            line-height: 1.5;
         }}
+
+        /* Section title label */
         .unsw-section-title {{
-            font-family: {UNSW_FONT_HEADING};
-            font-size: 1rem;
-            letter-spacing: 0.05em;
-            color: #333;
-            margin-bottom: 0.5rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            color: #6B7280;
+            margin-bottom: 0.75rem;
+        }}
+
+        /* Quiz / flashcard question card */
+        .quiz-card-pending {{
+            border: 2px solid #E5E7EB;
+            border-radius: 10px;
+            padding: 14px 16px;
+            margin: 10px 0;
+            background: #FFFFFF;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }}
+        .quiz-card-correct {{
+            border: 2px solid #10B981;
+            border-radius: 10px;
+            padding: 14px 16px;
+            margin: 10px 0;
+            background: #F0FDF4;
+            box-shadow: 0 1px 4px rgba(16,185,129,0.14);
+        }}
+        .quiz-card-wrong {{
+            border: 2px solid #EF4444;
+            border-radius: 10px;
+            padding: 14px 16px;
+            margin: 10px 0;
+            background: #FFF5F5;
+            box-shadow: 0 1px 4px rgba(239,68,68,0.14);
+        }}
+
+        /* Action card on dashboard */
+        .dash-action-card {{
+            background: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            border-radius: 14px;
+            padding: 1.25rem 1.5rem;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
         }}
         </style>
         """,
@@ -386,10 +601,14 @@ def _inject_unsw_css() -> None:
 def _clear_study_derived_state() -> None:
     keys = [
         "study_extracted_text",
+        "study_raw_text_before_guard",
         "study_upload_signature",
         "study_uploaded_files_cache",
         "study_recent_file_names",
         "last_uploaded_study_name",
+        "rag_chat_history",
+        "rag_prefill_query",
+        "node_mastery",
         "study_summary",
         "study_graph_data",
         "study_syllabus",
@@ -1239,14 +1458,12 @@ def _render_scope_quiz_cards(quiz: dict[str, Any], api_key: str, quiz_key: str =
         is_correct.setdefault(qid, False)
         translation_on.setdefault(qid, False)
 
-        border_color = "#111111"
         if bool(submitted.get(qid)):
-            border_color = "#1f9d55" if bool(is_correct.get(qid)) else "#dc2626"
+            card_class = "quiz-card-correct" if bool(is_correct.get(qid)) else "quiz-card-wrong"
+        else:
+            card_class = "quiz-card-pending"
         st.markdown(
-            (
-                f"<div style='border:2px solid {border_color}; border-radius:8px; "
-                f"padding:10px; margin:8px 0;'><strong>{idx}. {question}</strong></div>"
-            ),
+            f"<div class='{card_class}'><strong>{idx}. {question}</strong></div>",
             unsafe_allow_html=True,
         )
 
@@ -1346,6 +1563,152 @@ def _render_scope_quiz_cards(quiz: dict[str, Any], api_key: str, quiz_key: str =
     st.caption(_t("translation_call_count", n=int(st.session_state.get("quiz_translation_model_calls", 0))))
 
 
+def _render_changelog_sidebar() -> None:
+    """Render the last 3 changelog versions in the sidebar expander."""
+    changelog_path = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+    if not changelog_path.exists():
+        st.caption("CHANGELOG.md not found.")
+        return
+    try:
+        lines = changelog_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        st.caption("Could not read changelog.")
+        return
+
+    versions: list[tuple[str, list[str]]] = []
+    current_title = ""
+    current_lines: list[str] = []
+    for line in lines:
+        if line.startswith("## "):
+            if current_title:
+                versions.append((current_title, current_lines))
+            current_title = line[3:].strip()
+            current_lines = []
+        elif current_title:
+            current_lines.append(line)
+
+    if current_title:
+        versions.append((current_title, current_lines))
+
+    for title, content_lines in versions[:3]:
+        st.markdown(f"**{title}**")
+        for ln in content_lines:
+            stripped = ln.strip()
+            if stripped.startswith("- ") or stripped.startswith("### "):
+                st.markdown(stripped)
+        st.divider()
+
+
+def _render_rag_hub_page() -> None:
+    """RAG Expert Hub: native chat_input for text; file_uploader for images."""
+    import base64 as _b64
+    st.subheader(_t("rag_nav"))
+    course_id = _current_collection()
+    if not course_id:
+        st.warning(_t("select_course_first"))
+        return
+    st.caption(f"{_t('active_course')}: {_active_course_label()}")
+
+    api_key = (st.session_state.get("api_key") or "").strip()
+
+    if "rag_chat_history" not in st.session_state:
+        st.session_state["rag_chat_history"] = []
+
+    prefill = str(st.session_state.pop("rag_prefill_query", "") or "")
+
+    # ── Chat history ──
+    for msg in st.session_state["rag_chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("sources"):
+                st.caption(f"📄 {_t('rag_source')}: {msg['sources']}")
+
+    # ── Image upload (file uploader, always reliable) ──
+    img_file = st.file_uploader(
+        "📎 上传图片提问",
+        type=["png", "jpg", "jpeg", "webp", "gif"],
+        key="rag_img_upload",
+        label_visibility="collapsed",
+        help="上传截图或题目图片，AI 将解析后作答",
+    )
+    if img_file:
+        col_preview, col_btn = st.columns([5, 2])
+        with col_preview:
+            st.image(img_file, width=200)
+        with col_btn:
+            if st.button("🔍 分析此图片", key="rag_img_submit", disabled=not api_key):
+                img_file.seek(0)
+                img_bytes = img_file.read()
+                st.session_state["rag_chat_history"].append({"role": "user", "content": f"🖼️ [图片提问: {img_file.name}]"})
+                with st.spinner(_t("answering")):
+                    reply = LLMProcessor().analyze_image(img_bytes, "请详细解析这道题目，给出解题思路和答案。", api_key)
+                st.session_state["rag_chat_history"].append({
+                    "role": "assistant", "content": reply, "sources": "🖼️ 图片分析",
+                })
+                st.rerun()
+            if not api_key:
+                st.caption(_t("enter_api"))
+
+    # ── Index status indicator ──
+    vs = _get_vector_store()
+    chunk_count = vs._count_course_chunks()
+    if chunk_count == 0:
+        st.warning("⚠️ 当前课程尚未索引任何文件。请先在「学习」页上传 PDF 并点击「建立索引」，才能使用 RAG 检索。")
+    else:
+        st.caption(f"📚 已索引 {chunk_count} 个文本块，将优先从课程文件中检索答案。")
+
+    # ── Text input (native st.chat_input — never breaks) ──
+    chat_input = st.chat_input(_t("chat_placeholder"), key="rag_chat_input")
+    active_query = prefill if prefill else (chat_input or "")
+
+    if active_query:
+        if not api_key:
+            st.warning(_t("enter_api"))
+        else:
+            st.session_state["rag_chat_history"].append({"role": "user", "content": active_query})
+            search_error: str = ""
+            raw_chunks: list[dict] = []
+            try:
+                raw_chunks = vs.search(query=active_query, api_key=api_key, top_k=10)
+            except Exception as exc:
+                search_error = str(exc)
+
+            with st.spinner(_t("answering")):
+                base = _build_chat_context_base()
+                llm = LLMProcessor()
+
+                if search_error:
+                    # Surface the error so user knows RAG failed
+                    sources_str = f"⚠️ 检索失败: {search_error}"
+                    extra_ctx = (st.session_state.get("study_extracted_text") or "")[:8000]
+                    reply = llm.chat_general_knowledge(active_query, api_key, extra_context=extra_ctx)
+                elif raw_chunks:
+                    # RAG path: answer from course documents
+                    lines: list[str] = []
+                    source_parts: list[str] = []
+                    for i, ch in enumerate(raw_chunks, 1):
+                        meta = ch.get("metadata") or {}
+                        fname = meta.get("file_name", "Unknown")
+                        page = meta.get("page", "-")
+                        dist = ch.get("distance", "?")
+                        lines.append(f"[Chunk {i}] ({fname}, p.{page})\n{ch.get('text', '')}\n")
+                        if fname and i <= 3:
+                            source_parts.append(fname + (f" · 第{page}页" if page and page != "-" else ""))
+                    context = f"{base}\n\n[Retrieved Chunks]\n" + "\n".join(lines)
+                    sources_str = " | ".join(source_parts)
+                    reply = llm.chat_with_context(context, active_query, api_key)
+                else:
+                    # No relevant chunks found — fall back to general knowledge
+                    sources_str = "📚 通用知识（课程文件中未找到相关内容）"
+                    extra_ctx = (st.session_state.get("study_extracted_text") or "")[:8000]
+                    reply = llm.chat_general_knowledge(active_query, api_key, extra_context=extra_ctx)
+
+            st.session_state["rag_chat_history"].append({
+                "role": "assistant", "content": reply, "sources": sources_str,
+            })
+            st.rerun()
+
+
 def _render_sidebar() -> None:
     _render_language_switcher()
     st.sidebar.markdown(f'<p class="sidebar-header">{SIDEBAR_HEADER}</p>', unsafe_allow_html=True)
@@ -1397,7 +1760,7 @@ def _render_sidebar() -> None:
         st.sidebar.info(_t("course_create_first"))
         st.session_state["active_course_id"] = ""
 
-    nav_options = ["dashboard", "study", "outline", "graph", "quiz", "flashcards", "mistakes"]
+    nav_options = ["dashboard", "study", "outline", "graph", "quiz", "flashcards", "mistakes", "rag"]
     requested_page = str(st.session_state.pop("nav_page_request", "") or "")
     if requested_page in nav_options:
         st.session_state["nav_page_selector"] = requested_page
@@ -1409,10 +1772,11 @@ def _render_sidebar() -> None:
 
     st.sidebar.markdown(f"**{_t('nav')}**")
     nav_entries = [
-        ("dashboard", _t("dashboard")),
-        ("study", _t("study_mode")),
-        ("flashcards", _t("flashcards_nav")),
-        ("mistakes", _t("mistakes_nav")),
+        ("rag", f"{_t('rag_nav')}"),
+        ("dashboard", f"🏠  {_t('dashboard')}"),
+        ("study", f"📖  {_t('study_mode')}"),
+        ("flashcards", f"🃏  {_t('flashcards_nav')}"),
+        ("mistakes", f"❌  {_t('mistakes_nav')}"),
     ]
     for target_page, label in nav_entries:
         is_active = current_page == target_page or (
@@ -1485,81 +1849,113 @@ def _render_sidebar() -> None:
         st.caption(f"{_t('active_course')}: {_active_course_label()}")
         st.caption(f"DB: {DB_PATH}")
 
+    with st.sidebar.expander(f"📋 {_t('changelog_sidebar')}", expanded=False):
+        _render_changelog_sidebar()
+
     st.sidebar.divider()
     st.sidebar.markdown(f'<div class="quote-box">{random.choice(MOTIVATIONAL_QUOTES)}</div>', unsafe_allow_html=True)
 
 
 def _render_dashboard() -> None:
-    st.subheader(_t("dashboard"))
-    st.caption(_t("hero_tagline"))
+    # ── Hero banner ──────────────────────────────────────────────
+    course_label = _active_course_label()
+    st.markdown(
+        f"""
+        <div class="dashboard-hero">
+            <span class="hero-badge">UNSW · v{APP_VERSION}</span>
+            <div class="dashboard-hero-title">📚 {PAGE_TITLE}</div>
+            <div class="dashboard-hero-tagline">{_t('hero_tagline')}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+    # ── Metric cards ─────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(_t("app_version"), APP_VERSION)
     c2.metric(_t("schema_version"), str(st.session_state.get("schema_version", 0)))
-    c3.metric(_t("selected_lang"), _lang())
-    c4.metric(_t("active_course"), _active_course_label())
+    c3.metric(_t("selected_lang"), "中文" if _lang() == "zh" else "EN")
+    c4.metric(_t("active_course"), course_label if course_label != _t("course_not_selected") else "—")
 
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Quick actions ─────────────────────────────────────────────
     action1, action2, action3 = st.columns(3)
-    if action1.button(_t("go_study"), use_container_width=True):
+    if action1.button(f"📖  {_t('go_study')}", use_container_width=True):
         _request_nav("study")
-    if action2.button(_t("build_index"), use_container_width=True):
+    if action2.button(f"⚡  {_t('build_index')}", use_container_width=True):
         api_key = (st.session_state.get("api_key") or "").strip()
         _run_index_build(_cached_uploaded_file_objects(), api_key)
-    if action3.button(_t("start_exam"), use_container_width=True):
+    if action3.button(f"🎯  {_t('start_exam')}", use_container_width=True):
         _request_nav("quiz")
 
-    st.divider()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Study / Exam cards ────────────────────────────────────────
     qa1, qa2 = st.columns(2)
     with qa1.container(border=True):
-        st.markdown(f"#### {_t('continue_study')}")
+        st.markdown(f"#### 📖 {_t('continue_study')}")
         st.caption(_t("continue_study_desc"))
         recent = st.session_state.get("study_recent_file_names") or []
         if recent:
-            st.caption(", ".join(recent[:5]))
+            st.caption("📄 " + "，".join(recent[:5]))
         if st.button(_t("continue_study"), key="btn_continue_study", use_container_width=True):
             _request_nav("study")
     with qa2.container(border=True):
-        st.markdown(f"#### {_t('start_mock_exam')}")
+        st.markdown(f"#### 🎯 {_t('start_mock_exam')}")
         st.caption(_t("start_mock_exam_desc"))
-        st.caption(f"{_t('active_course')}: {_active_course_label()}")
+        st.caption(f"📌 {_t('active_course')}: **{course_label}**")
         if st.button(_t("start_mock_exam"), key="btn_start_mock", use_container_width=True):
             _request_nav("quiz")
 
-    st.divider()
-    st.markdown(f"#### {_t('updates')}")
-    updates = _get_changelog_preview(limit=3)
-    if updates:
-        for item in updates:
-            st.markdown(f"- {item}")
-    else:
-        st.caption(_t("not_available"))
-    toggle_key = "show_full_changelog"
-    if st.button(_t("hide_full_changelog") if st.session_state.get(toggle_key) else _t("open_full_changelog")):
-        st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
-    if st.session_state.get(toggle_key):
-        changelog_path = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
-        if changelog_path.exists():
-            st.code(changelog_path.read_text(encoding="utf-8"), language="markdown")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    st.divider()
-    st.markdown(f"#### {_t('activity')}")
-    idx_time = st.session_state.get("last_index_build_time") or _t("not_available")
-    exp_time = st.session_state.get("last_export_time") or _t("not_available")
-    last_collection = st.session_state.get("last_studied_collection") or _t("not_available")
-    st.markdown(f"- {_t('last_index_time')}: **{idx_time}**")
-    st.markdown(f"- {_t('last_export_time')}: **{exp_time}**")
-    st.markdown(f"- {_t('last_studied_collection')}: **{last_collection}**")
-    if idx_time == _t("not_available") and exp_time == _t("not_available"):
-        st.caption(_t("empty_activity_tip_1"))
-        st.caption(_t("empty_activity_tip_2"))
+    # ── Updates & Activity (two columns) ─────────────────────────
+    upd_col, act_col = st.columns([1, 1])
 
-    st.divider()
-    st.markdown(f"#### {_t('need_help')}")
-    if st.button(_t("help_index"), key="btn_help_index"):
-        _request_nav("study")
-    st.markdown(f"- {_t('help_migration')}: `backups/`")
-    st.markdown(f"- {_t('help_self_check')}")
-    st.caption(_t("help_self_check_cmd"))
+    with upd_col:
+        with st.container(border=True):
+            st.markdown(f"#### 📋 {_t('updates')}")
+            updates = _get_changelog_preview(limit=3)
+            if updates:
+                for item in updates:
+                    st.markdown(f"- {item}")
+            else:
+                st.caption(_t("not_available"))
+            toggle_key = "show_full_changelog"
+            if st.button(
+                _t("hide_full_changelog") if st.session_state.get(toggle_key) else _t("open_full_changelog"),
+                key="btn_toggle_changelog",
+                type="secondary",
+            ):
+                st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
+            if st.session_state.get(toggle_key):
+                changelog_path = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+                if changelog_path.exists():
+                    st.code(changelog_path.read_text(encoding="utf-8"), language="markdown")
+
+    with act_col:
+        with st.container(border=True):
+            st.markdown(f"#### 🕐 {_t('activity')}")
+            idx_time = st.session_state.get("last_index_build_time") or _t("not_available")
+            exp_time = st.session_state.get("last_export_time") or _t("not_available")
+            last_collection = st.session_state.get("last_studied_collection") or _t("not_available")
+            st.markdown(f"🔢 {_t('last_index_time')}: **{idx_time}**")
+            st.markdown(f"📤 {_t('last_export_time')}: **{exp_time}**")
+            st.markdown(f"📚 {_t('last_studied_collection')}: **{last_collection}**")
+            if idx_time == _t("not_available") and exp_time == _t("not_available"):
+                st.caption(_t("empty_activity_tip_1"))
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Help section ──────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(f"#### ❓ {_t('need_help')}")
+        h1, h2, h3 = st.columns(3)
+        if h1.button(_t("help_index"), key="btn_help_index", use_container_width=True, type="secondary"):
+            _request_nav("study")
+        h2.caption(f"📁 {_t('help_migration')}: `backups/`")
+        h3.caption(f"🔧 {_t('help_self_check')}")
 
 
 def _render_study_mode() -> None:
@@ -1611,9 +2007,28 @@ def _render_study_mode() -> None:
                 cache_by_course[course_id] = cache_for_course
                 st.session_state["study_uploaded_files_cache_by_course"] = cache_by_course
                 st.session_state["study_recent_file_names"] = [getattr(f, "name", "uploaded.pdf") for f in uploaded_files]
-                st.session_state["study_extracted_text"] = "\n\n".join(extracted_parts)
+                raw_text = "\n\n".join(extracted_parts)
+                st.session_state["study_extracted_text"] = raw_text
+                st.session_state["study_raw_text_before_guard"] = raw_text
                 st.session_state["last_uploaded_study_name"] = ", ".join(getattr(f, "name", "") for f in uploaded_files)
                 st.session_state["last_studied_collection"] = _active_course_label()
+
+        # Content Guard integration
+        api_key_cg = (st.session_state.get("api_key") or "").strip()
+        guard_enabled = st.checkbox(
+            _t("content_guard_toggle"),
+            key="content_guard_enabled",
+            help=_t("mastery_hint") if False else "启用后将用 AI 清洗 PDF 提取的原始文本，去除广告、页眉页脚等噪音。",
+        )
+        raw_text_for_guard = st.session_state.get("study_raw_text_before_guard", "")
+        if guard_enabled and raw_text_for_guard and api_key_cg:
+            if st.button("🛡️ 立即清洗", key="btn_content_guard_run"):
+                with st.spinner("正在清洗内容..."):
+                    cleaned = ContentGuard().clean(raw_text_for_guard, api_key_cg)
+                    st.session_state["study_extracted_text"] = cleaned
+                    before = len(raw_text_for_guard)
+                    after = len(cleaned)
+                    st.success(_t("content_guard_result", before=before, after=after))
 
         text = st.session_state.get("study_extracted_text", "")
         cached_files = _cached_uploaded_file_objects(course_id)
@@ -1714,6 +2129,274 @@ def _render_summary_page() -> None:
         st.markdown(st.session_state["study_summary"])
 
 
+def _build_graph_html(tree_data: dict, course_key: str = "default") -> str:
+    """Build a self-contained HTML string with ECharts horizontal collapsible tree,
+    bilingual toggle, mastery localStorage persistence, and detail panel."""
+    tree_json = json.dumps(tree_data, ensure_ascii=False)
+    safe_course_key = course_key.replace('"', '').replace("'", "")
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #FAFAFA; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }}
+  #toolbar {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: #FFFFFF;
+    border-bottom: 1px solid #E5E7EB;
+    flex-shrink: 0;
+  }}
+  .lang-btn {{
+    padding: 4px 12px;
+    border: 1px solid #D1D5DB;
+    border-radius: 6px;
+    background: #F9FAFB;
+    cursor: pointer;
+    font-size: 12px;
+    color: #374151;
+    transition: all 0.15s;
+  }}
+  .lang-btn.active {{
+    background: #FFCC00;
+    border-color: #E6B800;
+    color: #1a1a1a;
+    font-weight: 700;
+  }}
+  .lang-btn:hover {{ background: #FFF9C4; border-color: #FFCC00; }}
+  #mastery-hint {{
+    margin-left: auto;
+    font-size: 11px;
+    color: #9CA3AF;
+    font-style: italic;
+  }}
+  #chart {{ flex: 1; min-height: 0; }}
+  #detail-panel {{
+    display: none;
+    padding: 12px 16px;
+    background: #FFFFFF;
+    border-top: 2px solid #FFCC00;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
+    max-height: 160px;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }}
+  #detail-title {{
+    font-weight: 700;
+    font-size: 14px;
+    color: #1a1a1a;
+    margin-bottom: 6px;
+  }}
+  #detail-desc {{
+    font-size: 13px;
+    color: #444;
+    line-height: 1.6;
+  }}
+  #close-btn {{
+    float: right;
+    cursor: pointer;
+    font-size: 16px;
+    color: #888;
+    border: none;
+    background: transparent;
+    padding: 0 4px;
+  }}
+  #close-btn:hover {{ color: #333; }}
+  @keyframes pulse-green {{
+    0% {{ box-shadow: 0 0 0 0 rgba(34,197,94,0.5); }}
+    70% {{ box-shadow: 0 0 0 8px rgba(34,197,94,0); }}
+    100% {{ box-shadow: 0 0 0 0 rgba(34,197,94,0); }}
+  }}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button class="lang-btn" id="btn-zh" onclick="setLang('zh')">仅中文</button>
+  <button class="lang-btn active" id="btn-bi" onclick="setLang('bilingual')">中英对照</button>
+  <button class="lang-btn" id="btn-en" onclick="setLang('en')">English Only</button>
+  <span id="mastery-hint">双击节点切换掌握状态（绿色=已掌握）</span>
+</div>
+<div id="chart"></div>
+<div id="detail-panel">
+  <button id="close-btn" onclick="document.getElementById('detail-panel').style.display='none'">✕</button>
+  <div id="detail-title"></div>
+  <div id="detail-desc"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script>
+var RAW_TREE = {tree_json};
+var COURSE_KEY = "{safe_course_key}";
+var MASTERY_STORE_KEY = "mastery_" + COURSE_KEY;
+var currentLang = "bilingual";
+
+// Load mastery map from localStorage
+function loadMastery() {{
+  try {{ return JSON.parse(localStorage.getItem(MASTERY_STORE_KEY) || "{{}}"); }}
+  catch(e) {{ return {{}}; }}
+}}
+function saveMastery(m) {{
+  try {{ localStorage.setItem(MASTERY_STORE_KEY, JSON.stringify(m)); }} catch(e) {{}}
+}}
+var masteryMap = loadMastery();
+
+function getNodeDisplayName(node) {{
+  var zh = node.name_zh || node.name || "";
+  var en = node.name_en || node.name || "";
+  if (currentLang === "zh") return zh;
+  if (currentLang === "en") return en;
+  // bilingual
+  if (zh === en || !en) return zh;
+  return zh + "\\n" + en;
+}}
+function getNodeDesc(node) {{
+  var zh = node.desc_zh || node.description || "";
+  var en = node.desc_en || "";
+  if (currentLang === "zh") return zh;
+  if (currentLang === "en") return en || zh;
+  if (zh === en || !en) return zh;
+  return zh + "\\n" + en;
+}}
+
+function buildDisplayTree(node) {{
+  var isMastered = masteryMap[node.name || node.name_zh] === true;
+  var displayName = getNodeDisplayName(node);
+  var isMultiLine = displayName.indexOf("\\n") >= 0;
+  var symH = isMultiLine ? 44 : 32;
+  var result = {{
+    _raw: node,
+    name: displayName,
+    description: getNodeDesc(node),
+    itemStyle: isMastered
+      ? {{ color: "#F0FDF4", borderColor: "#22C55E", borderWidth: 2.5 }}
+      : undefined,
+  }};
+  if (node.children && node.children.length > 0) {{
+    result.children = node.children.map(buildDisplayTree);
+  }}
+  return result;
+}}
+
+function assignColors(node, depth) {{
+  var isMastered = node.itemStyle && node.itemStyle.borderColor === "#22C55E";
+  if (!isMastered) {{
+    if (depth === 0) {{
+      node.itemStyle = {{ color: "#FFCC00", borderColor: "#E6B800", borderWidth: 2 }};
+      node.label = {{ color: "#1a1a1a", fontWeight: "bold", fontSize: 12 }};
+    }} else if (depth === 1) {{
+      node.itemStyle = {{ color: "#F5F5F5", borderColor: "#CCCCCC", borderWidth: 1.5 }};
+      node.label = {{ color: "#333", fontSize: 11 }};
+    }} else if (depth === 2) {{
+      node.itemStyle = {{ color: "#E8F4FD", borderColor: "#93C5FD", borderWidth: 1 }};
+      node.label = {{ color: "#1D4ED8", fontSize: 10 }};
+    }} else {{
+      node.itemStyle = {{ color: "#FDF4FF", borderColor: "#C084FC", borderWidth: 1 }};
+      node.label = {{ color: "#7E22CE", fontSize: 10 }};
+    }}
+  }}
+  if (node.children) node.children.forEach(function(c) {{ assignColors(c, depth + 1); }});
+}}
+
+var chart = echarts.init(document.getElementById("chart"));
+
+function refreshChart() {{
+  var displayTree = buildDisplayTree(RAW_TREE);
+  assignColors(displayTree, 0);
+  var option = {{
+    backgroundColor: "#FAFAFA",
+    tooltip: {{
+      trigger: "item",
+      triggerOn: "mousemove",
+      formatter: function(params) {{
+        var d = params.data;
+        var desc = d.description || "";
+        if (desc.length > 100) desc = desc.substring(0, 100) + "…";
+        return "<b>" + (d.name || "").replace("\\n", " / ") + "</b>" + (desc ? "<br/><span style=\\"color:#666;font-size:12px\\">" + desc + "</span>" : "");
+      }}
+    }},
+    series: [{{
+      type: "tree",
+      data: [displayTree],
+      orient: "LR",
+      initialTreeDepth: 2,
+      expandAndCollapse: true,
+      roam: true,
+      symbol: "roundRect",
+      symbolSize: function(v, p) {{
+        var n = (p.data.name || "");
+        return n.indexOf("\\n") >= 0 ? [120, 44] : [110, 32];
+      }},
+      lineStyle: {{ curveness: 0.5, color: "#CCCCCC", width: 1.5 }},
+      label: {{
+        show: true,
+        position: "inside",
+        overflow: "truncate",
+        width: 105,
+        fontSize: 11,
+      }},
+      leaves: {{
+        label: {{ position: "inside", overflow: "truncate", width: 105 }},
+      }},
+      animationDuration: 300,
+      animationDurationUpdate: 300,
+      left: "5%",
+      right: "5%",
+      top: "5%",
+      bottom: "5%",
+    }}]
+  }};
+  chart.setOption(option, true);
+}}
+
+refreshChart();
+
+// Click handler: single click = detail panel, rapid double click = toggle mastery
+var lastClickTime = 0;
+var lastClickNode = null;
+chart.on("click", function(params) {{
+  if (params.dataType !== "node") return;
+  var now = Date.now();
+  var raw = params.data._raw;
+  if (!raw) return;
+  var nodeKey = raw.name || raw.name_zh || "";
+  if (now - lastClickTime < 400 && lastClickNode === nodeKey) {{
+    // Double click detected
+    masteryMap[nodeKey] = !masteryMap[nodeKey];
+    saveMastery(masteryMap);
+    refreshChart();
+    lastClickTime = 0;
+    lastClickNode = null;
+  }} else {{
+    lastClickTime = now;
+    lastClickNode = nodeKey;
+    // Show detail on single click
+    var d = params.data;
+    var title = (d.name || "").replace("\\n", " / ");
+    var desc = d.description || "";
+    document.getElementById("detail-title").textContent = title;
+    document.getElementById("detail-desc").textContent = desc;
+    document.getElementById("detail-panel").style.display = "block";
+  }}
+}});
+
+function setLang(lang) {{
+  currentLang = lang;
+  ["btn-zh", "btn-bi", "btn-en"].forEach(function(id) {{
+    document.getElementById(id).classList.remove("active");
+  }});
+  var activeId = lang === "zh" ? "btn-zh" : (lang === "en" ? "btn-en" : "btn-bi");
+  document.getElementById(activeId).classList.add("active");
+  refreshChart();
+}}
+
+window.addEventListener("resize", function() {{ chart.resize(); }});
+</script>
+</body>
+</html>"""
+
+
 def _render_graph_page() -> None:
     st.subheader(_t("graph_page"))
     course_id = _current_collection()
@@ -1741,44 +2424,11 @@ def _render_graph_page() -> None:
                         scope_set_id=int(scope_set.get("id")) if scope_set else None,
                     )
     graph_data = st.session_state.get("study_graph_data") or {}
-    nodes_data = graph_data.get("nodes") if isinstance(graph_data, dict) else []
-    links_data = graph_data.get("links") if isinstance(graph_data, dict) else []
-    categories_data = graph_data.get("categories") if isinstance(graph_data, dict) else []
-    if nodes_data or links_data:
-        category_colors = ["#FFCC00", "#F5F5F5", "#9E9E9E"]
-        categories_echarts = []
-        for i, cat in enumerate((categories_data or [])[:3]):
-            name = cat.get("name", ["Core Topic", "Key Concept", "Detail"][i])
-            color = category_colors[i] if i < len(category_colors) else "#BDBDBD"
-            categories_echarts.append({"name": name, "itemStyle": {"color": color}, "label": {"color": "#1a1a1a"}})
-        option = {
-            "backgroundColor": "#FFFFFF",
-            "tooltip": {"show": True},
-            "legend": {
-                "show": True,
-                "data": [c["name"] for c in categories_echarts],
-                "textStyle": {"color": "#333"},
-                "top": "top",
-            },
-            "series": [
-                {
-                    "type": "graph",
-                    "layout": "force",
-                    "symbolSize": 30,
-                    "roam": True,
-                    "label": {"show": True, "position": "right", "color": "#333"},
-                    "edgeSymbol": ["circle", "arrow"],
-                    "edgeSymbolSize": [4, 8],
-                    "lineStyle": {"curveness": 0.3, "color": "source", "opacity": 0.6},
-                    "emphasis": {"focus": "adjacency", "lineStyle": {"width": 3}},
-                    "force": {"repulsion": 1000, "edgeLength": [50, 200], "gravity": 0.08},
-                    "data": nodes_data,
-                    "links": links_data,
-                    "categories": categories_echarts,
-                }
-            ],
-        }
-        st_echarts(options=option, height="550px")
+    if isinstance(graph_data, dict) and graph_data:
+        if is_legacy_graph_format(graph_data):
+            graph_data = flat_graph_to_tree(graph_data)
+        if graph_data.get("name"):
+            components.html(_build_graph_html(graph_data, course_key=course_id), height=720, scrolling=False)
     st.divider()
     _render_outputs_tab(course_id, fixed_output_type="graph", key_prefix=f"graph_outputs_{course_id}")
 
@@ -1877,6 +2527,91 @@ def _render_outline_page() -> None:
             progress = checked_points / total_points
             st.progress(progress)
             st.caption(_t("progress", done=checked_points, all=total_points, pct=int(progress * 100)))
+
+    # --- Study Planner (merged into outline page) ---
+    if isinstance(syllabus, dict) and syllabus:
+        st.divider()
+        st.markdown(f"### 📅 {_t('planner_nav')}")
+
+        topics_raw: list[dict] = []
+        frameworks = syllabus.get("frameworks") if isinstance(syllabus.get("frameworks"), list) else []
+        if frameworks:
+            for fw in frameworks:
+                for sec in (fw.get("sections") or []):
+                    for kp in (sec.get("knowledge_points") or []):
+                        if isinstance(kp, dict):
+                            topics_raw.append({
+                                "topic": str(kp.get("point") or ""),
+                                "priority": str(kp.get("priority") or "Medium"),
+                            })
+        else:
+            topics_raw = [t for t in (syllabus.get("topics") or []) if isinstance(t, dict)]
+
+        if topics_raw:
+            today = date.today()
+            col_start, col_exam = st.columns(2)
+            start_date = col_start.date_input(_t("planner_start"), value=today, key="outline_planner_start")
+            exam_date = col_exam.date_input(_t("planner_exam"), value=today + timedelta(days=30), key="outline_planner_exam")
+
+            if exam_date > start_date:
+                days_left = (exam_date - start_date).days
+                st.metric(_t("planner_days_left", n=days_left), f"{exam_date}")
+
+                high_topics = [t for t in topics_raw if str(t.get("priority", "")).lower() in {"high", "高"}]
+                medium_topics = [t for t in topics_raw if str(t.get("priority", "")).lower() in {"medium", "中"}]
+                low_topics = [t for t in topics_raw if str(t.get("priority", "")).lower() not in {"high", "medium", "高", "中"}]
+
+                high_days = max(1, int(days_left * 0.50))
+                medium_days = max(1, int(days_left * 0.35))
+                low_days = max(1, days_left - high_days - medium_days)
+
+                def _assign_days(topic_list: list[dict], num_days: int, day_offset: int) -> list[tuple[int, list[str]]]:
+                    if not topic_list or num_days <= 0:
+                        return []
+                    result: list[tuple[int, list[str]]] = []
+                    per_day = max(1, len(topic_list) // num_days)
+                    idx = 0
+                    for d in range(num_days):
+                        bucket = topic_list[idx: idx + per_day]
+                        if bucket:
+                            result.append((day_offset + d, [t["topic"] for t in bucket]))
+                        idx += per_day
+                        if idx >= len(topic_list):
+                            break
+                    return result
+
+                schedule: list[tuple[int, list[str]]] = []
+                schedule.extend(_assign_days(high_topics, high_days, 0))
+                schedule.extend(_assign_days(medium_topics, medium_days, high_days))
+                schedule.extend(_assign_days(low_topics, low_days, high_days + medium_days))
+
+                if "node_mastery" not in st.session_state:
+                    st.session_state["node_mastery"] = {}
+
+                completed_count = 0
+                total_count = 0
+                for day_offset, day_topics in schedule:
+                    target_day = start_date + timedelta(days=day_offset)
+                    priority_label = "🔴 High" if day_offset < high_days else ("🟡 Medium" if day_offset < high_days + medium_days else "🟢 Low")
+                    with st.expander(f"Day {day_offset + 1} · {target_day} · {priority_label}", expanded=(day_offset == 0)):
+                        for topic in day_topics:
+                            total_count += 1
+                            cb_key = f"outline_planner_topic_{abs(hash(topic))}"
+                            is_done = st.checkbox(topic, key=cb_key, value=st.session_state["node_mastery"].get(topic, False))
+                            if is_done:
+                                completed_count += 1
+                                if not st.session_state["node_mastery"].get(topic):
+                                    st.session_state["node_mastery"][topic] = True
+                                    st.balloons()
+                            else:
+                                st.session_state["node_mastery"][topic] = False
+
+                if total_count > 0:
+                    pct = int(completed_count / total_count * 100)
+                    st.progress(completed_count / total_count)
+                    st.caption(f"复习进度：{completed_count}/{total_count} ({pct}%)")
+            else:
+                st.warning("考试日期必须晚于开始日期。")
 
 
 def _render_quiz_page() -> None:
@@ -2142,11 +2877,12 @@ def _render_mcq_flashcard(
     if selected and selected not in options:
         selected = ""
 
-    border_color = "#111111"
     if submitted:
-        border_color = "#16a34a" if bool(is_correct_map.get(card_key)) else "#dc2626"
+        card_class = "quiz-card-correct" if bool(is_correct_map.get(card_key)) else "quiz-card-wrong"
+    else:
+        card_class = "quiz-card-pending"
     st.markdown(
-        f"<div style='border:2px solid {border_color}; border-radius:8px; padding:10px; margin:8px 0;'><strong>{stem}</strong></div>",
+        f"<div class='{card_class}'><strong>{stem}</strong></div>",
         unsafe_allow_html=True,
     )
 
@@ -2211,16 +2947,19 @@ def _render_mcq_flashcard(
     st.caption(_t("quiz_result_line", chosen=selected_value or "-", correct=correct_value or "-"))
 
     for oi, option in enumerate(options, 1):
-        opt_color = "#111111"
-        bg = "#f8f8f8"
+        opt_color = "#D1D5DB"
+        bg = "#F9FAFB"
+        icon = ""
         if option == correct_value:
-            opt_color = "#166534"
-            bg = "#dcfce7"
+            opt_color = "#10B981"
+            bg = "#F0FDF4"
+            icon = "✓ "
         elif option == selected_value and selected_value != correct_value:
-            opt_color = "#991b1b"
-            bg = "#fee2e2"
+            opt_color = "#EF4444"
+            bg = "#FFF5F5"
+            icon = "✗ "
         st.markdown(
-            f"<div style='border:1px solid {opt_color}; border-radius:6px; padding:6px 8px; margin:4px 0; background:{bg};'>{oi}. {option}</div>",
+            f"<div style='border:1.5px solid {opt_color}; border-radius:8px; padding:8px 12px; margin:5px 0; background:{bg}; font-size:0.9rem;'>{icon}{oi}. {option}</div>",
             unsafe_allow_html=True,
         )
 
@@ -2234,6 +2973,9 @@ def _render_mcq_flashcard(
             st.markdown(f"**{_t('flashcards_translated_answer')}**: {answer_zh}")
         if explanation_zh:
             st.markdown(f"**{_t('flashcards_translated_explanation')}**: {explanation_zh}")
+    if st.button(_t("deep_link_btn"), key=f"{state_prefix}_mcq_deeplink_{card_key}", type="secondary"):
+        st.session_state["rag_prefill_query"] = stem[:500]
+        _request_nav("rag")
     return True
 
 
@@ -2277,7 +3019,7 @@ def _render_knowledge_flashcard(
         if explanation_zh:
             st.markdown(f"**{_t('flashcards_translated_explanation')}**: {explanation_zh}")
 
-    known_col, unknown_col = st.columns(2)
+    known_col, unknown_col, deeplink_col = st.columns([2, 2, 2])
     if known_col.button(_t("flashcards_known"), key=f"{state_prefix}_knowledge_known_{card_key}", use_container_width=True):
         return "known"
     if unknown_col.button(
@@ -2286,6 +3028,9 @@ def _render_knowledge_flashcard(
         use_container_width=True,
     ):
         return "unknown"
+    if deeplink_col.button(_t("deep_link_btn"), key=f"{state_prefix}_deeplink_{card_key}", use_container_width=True, type="secondary"):
+        st.session_state["rag_prefill_query"] = stem[:500]
+        _request_nav("rag")
     return ""
 
 
@@ -2539,13 +3284,16 @@ def _render_mistakes_page() -> None:
                 f"{_t('mistakes_wrong_count')}: {int(row.get('wrongCount') or 0)} | "
                 f"{_t('mistakes_last_wrong')}: {row.get('lastWrongAt') or '-'}"
             )
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             if c1.button(_t("mistakes_mark_mastered"), key=f"mistake_master_{row_id}", use_container_width=True):
                 mark_mistake_master(_current_user_id(), row_id)
                 st.rerun()
             if c2.button(_t("mistakes_delete"), key=f"mistake_delete_{row_id}", use_container_width=True):
                 archive_mistake(_current_user_id(), row_id)
                 st.rerun()
+            if c3.button(_t("deep_link_btn"), key=f"mistake_deeplink_{row_id}", use_container_width=True, type="secondary"):
+                st.session_state["rag_prefill_query"] = stem[:500]
+                _request_nav("rag")
 
     review_cards = st.session_state.get("mistakes_review_cards")
     if isinstance(review_cards, list) and review_cards:
@@ -2646,8 +3394,6 @@ def main() -> None:
     _render_sidebar()
     page = st.session_state.get("nav_page_selector", "dashboard")
     if page == "dashboard":
-        st.markdown('<div class="unsw-header"><span class="unsw-logo">UNSW</span></div>', unsafe_allow_html=True)
-        st.title(PAGE_TITLE)
         _render_dashboard()
     elif page == "study":
         _render_study_mode()
@@ -2661,6 +3407,8 @@ def main() -> None:
         _render_flashcards_page()
     elif page == "mistakes":
         _render_mistakes_page()
+    elif page == "rag":
+        _render_rag_hub_page()
     else:
         _render_dashboard()
 

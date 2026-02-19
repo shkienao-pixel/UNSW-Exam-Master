@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0] - 2026-02-19
+
+### Added
+- Added Content Guard (A): LLM-based PDF noise cleaning before indexing, with before/after char count comparison.
+- Added Bilingual Mind Map (B): ECharts tree now supports 中文 Only / 中英对照 / English Only toggle.
+- Added Mastery System (B): Double-click nodes to toggle mastery state (green border + pulse animation), persisted via localStorage.
+- Added depth increase to 8 layers for knowledge graph (previously capped at 3).
+- Added Dual-language fields (name_zh/name_en/desc_zh/desc_en) to graph generation prompt and tree validator.
+- Added RAG Expert Hub page (/rag): 60/40 chat+map layout, image upload, source citations (file+page), mini mind map.
+- Added Study Planner page (/planner): date range picker, automatic topic scheduling by priority, checkbox progress with balloons animation.
+- Added Deep-Link buttons in Flashcard reviewer and Mistakes page: "🔍 详细解析" jumps to RAG hub with pre-filled query.
+- Added Changelog sidebar expander: shows last 3 versions at the bottom of the sidebar.
+- Added 16 new i18n keys for all new features (EN+ZH).
+
+### Changed
+- Changed sidebar navigation to include RAG hub at top and Study Planner.
+- Changed graph prompt to output bilingual node fields for language toggle support.
+- Changed _validate_tree max_depth from 3 to 8.
+
 ## [0.2.4] - 2026-02-18
 
 ### Added
