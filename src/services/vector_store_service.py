@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from langchain_openai import OpenAIEmbeddings
 
 from services.document_processor import PDFProcessor
 from utils.file_utils import ensure_directory_exists
+from utils.metrics import log_metric
 
 CURRENT_INDEX_VERSION = "1"
 CURRENT_EMBEDDING_MODEL_NAME = "text-embedding-3-small"
@@ -44,22 +46,32 @@ class DocumentVectorStore:
             },
         )
         self.pdf_processor = PDFProcessor()
+        # Cache the embedder client — creating a new OpenAIEmbeddings instance
+        # on every call recreates the underlying HTTP client unnecessarily.
+        self._embedder: OpenAIEmbeddings | None = None
+        self._embedder_api_key: str = ""
 
     def _normalize_name(self, value: str) -> str:
         cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", value or "default")
         return cleaned[:64] or "default"
 
+    def _get_embedder(self, api_key: str) -> OpenAIEmbeddings:
+        """Return a cached OpenAIEmbeddings client; rebuild only when api_key changes."""
+        key = api_key.strip()
+        if self._embedder is None or self._embedder_api_key != key:
+            self._embedder = OpenAIEmbeddings(model=CURRENT_EMBEDDING_MODEL_NAME, api_key=key)
+            self._embedder_api_key = key
+        return self._embedder
+
     def _make_embeddings(self, api_key: str, texts: list[str]) -> list[list[float]]:
         if not api_key or not api_key.strip():
             raise ValueError("Please provide a valid API key before indexing/searching.")
-        embedder = OpenAIEmbeddings(model=CURRENT_EMBEDDING_MODEL_NAME, api_key=api_key.strip())
-        return embedder.embed_documents(texts)
+        return self._get_embedder(api_key).embed_documents(texts)
 
     def _embed_query(self, api_key: str, query: str) -> list[float]:
         if not api_key or not api_key.strip():
             raise ValueError("Please provide a valid API key before indexing/searching.")
-        embedder = OpenAIEmbeddings(model=CURRENT_EMBEDDING_MODEL_NAME, api_key=api_key.strip())
-        return embedder.embed_query(query)
+        return self._get_embedder(api_key).embed_query(query)
 
     def _set_index_metadata(self, embedding_dim: int | None = None) -> None:
         metadata = {k: v for k, v in dict(self.collection.metadata or {}).items() if k != "hnsw:space"}
@@ -150,16 +162,17 @@ class DocumentVectorStore:
         )
         return bool(existing.get("ids"))
 
-    def index_uploaded_files(self, files: list[Any], api_key: str) -> dict[str, int]:
+    def index_uploaded_files(self, files: list[Any], api_key: str) -> dict[str, Any]:
         """
         Index multiple uploaded PDF files into Chroma.
 
-        Returns stats with keys: indexed_files, skipped_files, chunks_added.
+        Returns stats with keys: indexed_files, skipped_files, chunks_added, elapsed_s.
         """
         indexed_files = 0
         skipped_files = 0
         chunks_added = 0
         last_embedding_dim: int | None = None
+        _t0 = time.perf_counter()
 
         try:
             for file_obj in files:
@@ -202,13 +215,23 @@ class DocumentVectorStore:
         # Update collection metadata only after the indexing pass completes successfully.
         self._set_index_metadata(last_embedding_dim)
 
+        elapsed_s = round(time.perf_counter() - _t0, 3)
+        log_metric(
+            "index",
+            elapsed_s,
+            course_id=self.course_id,
+            indexed_files=indexed_files,
+            skipped_files=skipped_files,
+            chunks_added=chunks_added,
+        )
         return {
             "indexed_files": indexed_files,
             "skipped_files": skipped_files,
             "chunks_added": chunks_added,
+            "elapsed_s": elapsed_s,
         }
 
-    def _count_course_chunks(self) -> int:
+    def count_indexed_chunks(self) -> int:
         """Return number of indexed chunks for current course."""
         try:
             res = self.collection.get(
@@ -219,30 +242,42 @@ class DocumentVectorStore:
         except Exception:
             return 0
 
+    # Keep private alias for internal callers that still use the old name.
+    _count_course_chunks = count_indexed_chunks
+
     def search(self, query: str, api_key: str, top_k: int = 8) -> list[dict[str, Any]]:
         """Retrieve top-k relevant chunks for the current course collection.
 
         Raises ValueError with a human-readable message on API or index errors
         so callers can surface it to the user rather than silently falling back.
-        Distance threshold of 0.82 filters out semantically unrelated chunks.
         """
         if not query or not query.strip():
             return []
 
         query_embedding = self._embed_query(api_key, query)
 
-        # Chroma raises if n_results > total indexed items — cap to actual count
-        total = self._count_course_chunks()
+        # Chroma raises if n_results > total indexed items — cap to actual count.
+        # Guard against TOCTOU: if a concurrent clear_course() runs between
+        # count_indexed_chunks() and collection.query(), catch the Chroma error
+        # and return an empty result rather than surfacing a confusing exception.
+        total = self.count_indexed_chunks()
         if total == 0:
             return []
         n = min(max(1, top_k), total)
 
-        result = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n,
-            where={"course_id": self.course_id},
-            include=["documents", "metadatas", "distances"],
-        )
+        try:
+            result = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n,
+                where={"course_id": self.course_id},
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:
+            err = str(exc).lower()
+            if "n_results" in err or "number of results" in err or "greater than" in err:
+                # Index shrank between count and query — safe to return empty.
+                return []
+            raise
 
         docs = (result.get("documents") or [[]])[0]
         metas = (result.get("metadatas") or [[]])[0]

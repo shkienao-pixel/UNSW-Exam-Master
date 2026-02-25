@@ -5,10 +5,13 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+from utils.metrics import log_metric
 
 SYSTEM_PROMPT = (
     "You are a UNSW teaching assistant. Summarize the provided course text into structured revision notes "
@@ -62,14 +65,24 @@ TRANSLATE_FLASHCARD_PROMPT = (
 )
 
 
-def _call_llm(system_prompt: str, user_message: str, api_key: str, temperature: float = 0.3) -> str:
+def _call_llm(
+    system_prompt: str,
+    user_message: str,
+    api_key: str,
+    temperature: float = 0.3,
+    operation: str = "llm",
+    course_id: str = "",
+) -> str:
     """Invoke OpenAI Chat with the given system and user message."""
     if not (api_key and api_key.strip()):
         raise ValueError("Please provide a valid API key.")
+    _t0 = time.perf_counter()
     try:
         llm = ChatOpenAI(model="gpt-4o", api_key=api_key.strip(), temperature=temperature)
         response = llm.invoke([("system", system_prompt), ("human", user_message)])
-        return response.content if response.content else ""
+        content = response.content if response.content else ""
+        log_metric(operation, round(time.perf_counter() - _t0, 3), course_id=course_id)
+        return content
     except Exception as e:  # pragma: no cover - network/API specific
         err_msg = str(e).lower()
         if "invalid" in err_msg or "authentication" in err_msg or "incorrect api key" in err_msg:
@@ -153,14 +166,14 @@ def _extract_json_array(raw: str) -> list[Any]:
 class LLMProcessor:
     """Generates structured summaries and utility outputs via OpenAI."""
 
-    def invoke(self, system_prompt: str, user_message: str, api_key: str, temperature: float = 0.3) -> str:
-        return _call_llm(system_prompt, user_message, api_key, temperature)
+    def invoke(self, system_prompt: str, user_message: str, api_key: str, temperature: float = 0.3, operation: str = "llm") -> str:
+        return _call_llm(system_prompt, user_message, api_key, temperature, operation=operation)
 
     def generate_summary(self, text: str, api_key: str) -> str:
-        return _call_llm(SYSTEM_PROMPT, text, api_key, temperature=0.3)
+        return _call_llm(SYSTEM_PROMPT, text, api_key, temperature=0.3, operation="summary")
 
     def generate_syllabus_checklist(self, text: str, api_key: str) -> dict[str, Any]:
-        raw = _call_llm(SYLLABUS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3)
+        raw = _call_llm(SYLLABUS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3, operation="outline")
         obj = _extract_json_object(raw)
         title = str(obj.get("module_title") or "").strip()
         topics_raw = obj.get("topics") if isinstance(obj, dict) else []
@@ -265,7 +278,7 @@ class LLMProcessor:
         return {"module_title": title, "frameworks": frameworks_out, "topics": merged_topics}
 
     def generate_flashcards(self, text: str, api_key: str) -> list[dict[str, str]]:
-        raw = _call_llm(FLASHCARDS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3)
+        raw = _call_llm(FLASHCARDS_SYSTEM_PROMPT, text[:24000], api_key, temperature=0.3, operation="flashcard")
         arr = _extract_json_array(raw)
         out: list[dict[str, str]] = []
         for item in arr[:10]:
@@ -282,14 +295,14 @@ class LLMProcessor:
 
     def chat_with_context(self, context: str, user_message: str, api_key: str) -> str:
         system = f"{CHAT_CONTEXT_PROMPT}\n\n[Context]\n{context[:20000]}"
-        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.4)
+        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.4, operation="chat")
 
     def chat_general_knowledge(self, user_message: str, api_key: str, extra_context: str = "") -> str:
         """Answer from general knowledge when vector search returns no relevant chunks."""
         system = CHAT_GENERAL_PROMPT
         if extra_context:
             system = f"{CHAT_GENERAL_PROMPT}\n\n[Course Background (partial)]\n{extra_context[:8000]}"
-        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.5)
+        return _call_llm(system, f"User question: {user_message}", api_key, temperature=0.5, operation="chat")
 
     def translate_question(self, question: str, options: list[str], api_key: str) -> dict[str, Any]:
         """Translate one MCQ question and options into Chinese."""

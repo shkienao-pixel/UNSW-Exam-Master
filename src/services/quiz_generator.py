@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 from services.llm_service import LLMProcessor
+from utils.metrics import log_metric
 
 QUIZ_SYSTEM_PROMPT = (
     "You are a UNSW exam question writer. "
@@ -124,16 +126,22 @@ class QuizGenerator:
             "- Keep explanations concise and exam-focused.\n\n"
             f"{text[:30000]}"
         )
+        _t0 = time.perf_counter()
         try:
             raw = self._llm.invoke(
                 QUIZ_SYSTEM_PROMPT,
                 user_message,
                 api_key=api_key.strip(),
                 temperature=0.4,
+                operation="quiz",
             )
         except ValueError:
             return EMPTY_QUIZ.copy()
+        elapsed_s = round(time.perf_counter() - _t0, 3)
         if not raw:
             return EMPTY_QUIZ.copy()
         parsed = _try_parse_json(raw)
-        return _validate_quiz(parsed)
+        result = _validate_quiz(parsed)
+        log_metric("quiz", elapsed_s, num_questions=len(result.get("questions", [])))
+        result["elapsed_s"] = elapsed_s
+        return result

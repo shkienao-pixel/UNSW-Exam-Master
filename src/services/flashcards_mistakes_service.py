@@ -217,7 +217,9 @@ def list_flashcards_by_deck(user_id: str, deck_id: str) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id
+            SELECT id, user_id, course_id, deck_id, card_type,
+                   scope_json, front_json, back_json, stats_json, source_refs_json,
+                   created_at, updated_at
             FROM flashcards
             WHERE user_id=? AND deck_id=?
             ORDER BY created_at ASC, id ASC
@@ -226,9 +228,23 @@ def list_flashcards_by_deck(user_id: str, deck_id: str) -> list[dict[str, Any]]:
         ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
-        item = get_flashcard(str(row[0]), normalized_user_id)
-        if item:
-            out.append(item)
+        item = _row_to_dict(row)
+        if not item:
+            continue
+        out.append({
+            "id": item["id"],
+            "userId": item["user_id"],
+            "courseId": item["course_id"],
+            "deckId": item["deck_id"],
+            "type": item["card_type"],
+            "scope": _json_loads(item.get("scope_json"), {"chapterIds": [], "fileIds": []}),
+            "front": _json_loads(item.get("front_json"), {}),
+            "back": _json_loads(item.get("back_json"), {}),
+            "stats": _normalize_stats(_json_loads(item.get("stats_json"), {})),
+            "sourceRefs": _json_loads(item.get("source_refs_json"), []),
+            "createdAt": item["created_at"],
+            "updatedAt": item["updated_at"],
+        })
     return out
 
 

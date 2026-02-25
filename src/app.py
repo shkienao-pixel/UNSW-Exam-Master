@@ -63,6 +63,7 @@ from services.course_workspace_service import (
     save_artifact,
 )
 from services.vector_store_service import DocumentVectorStore
+from utils.metrics import get_metrics_summary
 from services.flashcards_mistakes_service import (
     archive_mistake,
     list_flashcards_by_deck,
@@ -197,41 +198,44 @@ def _render_language_switcher() -> None:
     st.sidebar.caption(f"{_t('lang_label')}: {_t('lang_zh') if _lang() == 'zh' else _t('lang_en')}")
 
 
-def _ensure_migrations_once() -> int:
-    global _MIGRATIONS_DONE
-    if not _MIGRATIONS_DONE:
-        try:
-            version = migrate_to_latest()
-        except MigrationInProgressError:
-            if not st.session_state.get("migration_in_progress_notice_shown"):
-                st.info("Migration in progress. Please refresh shortly.")
-                st.session_state["migration_in_progress_notice_shown"] = True
-            return int(st.session_state.get("schema_version", 0))
-        except MigrationError as e:
-            st.error(f"{e}")
-            st.error(f"Recovery: restore from backups in {BACKUPS_DIR}")
-            st.stop()
-        _MIGRATIONS_DONE = True
-        st.session_state["migration_in_progress_notice_shown"] = False
-        st.session_state["schema_version"] = version
-        return version
-    if "schema_version" in st.session_state:
-        return int(st.session_state["schema_version"])
-    # Best effort if session state got reset while process is alive.
+def _run_migrations() -> int | None:
+    """Run migrate_to_latest(), update session state, and return the version.
+
+    Returns None when a migration is already in progress (caller should use
+    the cached version from session state).  Calls st.stop() on hard failure.
+    """
     try:
         version = migrate_to_latest()
     except MigrationInProgressError:
         if not st.session_state.get("migration_in_progress_notice_shown"):
             st.info("Migration in progress. Please refresh shortly.")
             st.session_state["migration_in_progress_notice_shown"] = True
-        return int(st.session_state.get("schema_version", 0))
+        return None
     except MigrationError as e:
         st.error(f"{e}")
         st.error(f"Recovery: restore from backups in {BACKUPS_DIR}")
         st.stop()
+        return None  # unreachable, but satisfies type checker
     st.session_state["migration_in_progress_notice_shown"] = False
     st.session_state["schema_version"] = version
     return version
+
+
+def _ensure_migrations_once() -> int:
+    global _MIGRATIONS_DONE
+    if not _MIGRATIONS_DONE:
+        result = _run_migrations()
+        if result is None:
+            return int(st.session_state.get("schema_version", 0))
+        _MIGRATIONS_DONE = True
+        return result
+    if "schema_version" in st.session_state:
+        return int(st.session_state["schema_version"])
+    # Best effort if session state was reset while the process stayed alive.
+    result = _run_migrations()
+    if result is None:
+        return int(st.session_state.get("schema_version", 0))
+    return result
 
 
 def _inject_unsw_css() -> None:
@@ -1357,10 +1361,17 @@ def _render_generation_recent_jump(course_id: str, current_page: str) -> None:
         ("outline", "outline", _t("outline_page")),
         ("quiz", "quiz", _t("quiz_page")),
     ]
+    # Single DB query — list_outputs returns DESC by created_at, so first hit per type is the latest.
+    all_outputs = list_outputs(course_id)
+    latest_by_type: dict[str, dict[str, Any]] = {}
+    for row in all_outputs:
+        ot = str(row.get("output_type") or row.get("type") or "")
+        if ot and ot not in latest_by_type:
+            latest_by_type[ot] = row
+
     cols = st.columns(4)
     for i, (target_page, out_type, label) in enumerate(page_defs):
-        latest_rows = list_outputs(course_id, out_type)
-        latest = latest_rows[0] if latest_rows else None
+        latest = latest_by_type.get(out_type)
         button_text = _t("open_latest", name=label)
         button_key = f"latest_jump_{current_page}_{target_page}"
         if latest:
@@ -1651,7 +1662,7 @@ def _render_rag_hub_page() -> None:
 
     # ── Index status indicator ──
     vs = _get_vector_store()
-    chunk_count = vs._count_course_chunks()
+    chunk_count = vs.count_indexed_chunks()
     if chunk_count == 0:
         st.warning("⚠️ 当前课程尚未索引任何文件。请先在「学习」页上传 PDF 并点击「建立索引」，才能使用 RAG 检索。")
     else:
@@ -1945,6 +1956,42 @@ def _render_dashboard() -> None:
             st.markdown(f"📚 {_t('last_studied_collection')}: **{last_collection}**")
             if idx_time == _t("not_available") and exp_time == _t("not_available"):
                 st.caption(_t("empty_activity_tip_1"))
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Performance Metrics ───────────────────────────────────────
+    perf_summary = get_metrics_summary()
+    if perf_summary:
+        with st.container(border=True):
+            st.markdown("#### ⚡ Performance Metrics")
+            _OP_LABELS = {
+                "index": "索引",
+                "summary": "摘要生成",
+                "quiz": "Quiz 生成",
+                "flashcard": "闪卡生成",
+                "outline": "大纲生成",
+                "graph": "知识图谱",
+                "chat": "RAG 对话",
+                "llm": "LLM 调用",
+            }
+            cols = st.columns(min(len(perf_summary), 4))
+            for col, (op, stats) in zip(cols, list(perf_summary.items())[:4]):
+                label = _OP_LABELS.get(op, op)
+                col.metric(
+                    label=f"{label} (avg)",
+                    value=f"{stats['avg_s']}s",
+                    help=f"共 {stats['total']} 次  ·  最快 {stats['min_s']}s  ·  最慢 {stats['max_s']}s  ·  最近 {stats['last_at']}",
+                )
+            if len(perf_summary) > 4:
+                remaining = list(perf_summary.items())[4:]
+                cols2 = st.columns(min(len(remaining), 4))
+                for col, (op, stats) in zip(cols2, remaining):
+                    label = _OP_LABELS.get(op, op)
+                    col.metric(
+                        label=f"{label} (avg)",
+                        value=f"{stats['avg_s']}s",
+                        help=f"共 {stats['total']} 次  ·  最快 {stats['min_s']}s  ·  最慢 {stats['max_s']}s",
+                    )
 
     st.markdown("<br>", unsafe_allow_html=True)
 

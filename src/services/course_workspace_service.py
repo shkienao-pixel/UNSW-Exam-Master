@@ -135,22 +135,23 @@ def save_artifact(course_id: str, file_name: str, file_bytes: bytes) -> dict[str
             return _row_to_dict(existing) or {}
 
         now = _now_iso()
-        conn.execute(
+        norm_path = str(rel_path).replace("\\", "/")
+        cur = conn.execute(
             """
             INSERT INTO artifacts(course_id, file_name, file_hash, file_path, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (course_id, clean_name, digest, str(rel_path).replace("\\", "/"), now),
+            (course_id, clean_name, digest, norm_path, now),
         )
-        row = conn.execute(
-            """
-            SELECT id, course_id, file_name, file_hash, file_path, created_at
-            FROM artifacts
-            WHERE course_id=? AND file_hash=?
-            """,
-            (course_id, digest),
-        ).fetchone()
-    return _row_to_dict(row) or {}
+        artifact_id = int(cur.lastrowid)
+    return {
+        "id": artifact_id,
+        "course_id": course_id,
+        "file_name": clean_name,
+        "file_hash": digest,
+        "file_path": norm_path,
+        "created_at": now,
+    }
 
 
 def list_artifacts(course_id: str) -> list[dict[str, Any]]:
@@ -271,8 +272,18 @@ def ensure_default_scope_set(course_id: str) -> dict[str, Any]:
             "SELECT id FROM artifacts WHERE course_id=? ORDER BY id ASC",
             (course_id,),
         ).fetchall()
-        artifact_ids = [int(r[0]) for r in artifacts]
-        _replace_scope_set_items_conn(conn, scope_set_id, artifact_ids)
+        artifact_ids = sorted({int(r[0]) for r in artifacts})
+
+        # Only replace when the artifact set has actually changed — avoids
+        # unnecessary DELETE + re-INSERT on every page render.
+        current_rows = conn.execute(
+            "SELECT artifact_id FROM scope_set_items WHERE scope_set_id=? ORDER BY artifact_id ASC",
+            (scope_set_id,),
+        ).fetchall()
+        current_ids = sorted({int(r[0]) for r in current_rows})
+
+        if artifact_ids != current_ids:
+            _replace_scope_set_items_conn(conn, scope_set_id, artifact_ids)
 
     scope_set = get_scope_set(scope_set_id)
     if scope_set is None:
